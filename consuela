@@ -1,0 +1,656 @@
+#!/bin/sh
+# Reclaim Xcode leftover data, package-manager caches, and Docker disk.
+
+set -eu
+
+usage() {
+  cat <<'EOF'
+usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling]
+                [-y] [--dry-run]
+
+With no group flags, scans and cleans every group after confirmation.
+
+  --xcode             XCTestDevices, unavailable simulators and runtimes,
+                      DerivedData, CoreSimulator caches, simulator logs,
+                      xcodebuild cache, SwiftPM cache, CocoaPods cache
+  --cache             npm, Yarn, pnpm, Bun, pip, uv, Homebrew download cache
+  --docker            unused images (including tagged), containers, build
+                      cache; volumes kept. Same as --docker-all
+  --docker-all        same as --docker
+  --docker-dangling   dangling images, stopped containers, and build cache;
+                      volumes kept
+  -y, --yes           skip the confirmation prompt (not when DOCKER_HOST is set)
+  --dry-run           print the plan and exit 0 without deleting
+EOF
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+warn() {
+  echo "warning: $*" >&2
+}
+
+# Kilobytes occupied by a path. Missing paths are 0.
+du_kb() {
+  if [ ! -e "$1" ]; then
+    echo 0
+    return 0
+  fi
+  kb=$(du -sk "$1" 2>/dev/null | awk '{print $1}')
+  case "$kb" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "$kb" ;;
+  esac
+}
+
+fmt_kb() {
+  awk -v kb="${1:-0}" 'BEGIN {
+    if (kb < 1) { printf "0B"; exit }
+    bytes = kb * 1024
+    if (bytes < 1024) printf "%dB", bytes
+    else if (bytes < 1048576) printf "%dK", kb
+    else if (bytes < 1073741824) printf "%.1fM", bytes / 1048576
+    else printf "%.1fG", bytes / 1073741824
+  }'
+}
+
+first_line() {
+  "$@" 2>/dev/null | sed -n '1p'
+}
+
+canonical_dir() {
+  [ -d "$1" ] || return 1
+  (CDPATH='' cd -P -- "$1" && pwd -P)
+}
+
+# If command exists and prints a non-empty first line, use that; else fallback.
+# Usage: cache_path_or_default <fallback> <cmd> [args...]
+cache_path_or_default() {
+  fallback=$1
+  shift
+  got=
+  if [ $# -gt 0 ] && have "$1"; then
+    got=$(first_line "$@") || got=
+  fi
+  if [ -n "$got" ]; then
+    printf '%s\n' "$got"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+yarn_cache_paths() {
+  p=$(cache_path_or_default "" yarn cache dir)
+  if [ -n "$p" ]; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  printf '%s\n' \
+    "$HOME/Library/Caches/Yarn" \
+    "$HOME/.yarn/cache" \
+    "$HOME/.cache/yarn"
+}
+
+uv_cache_paths() {
+  p=$(cache_path_or_default "" uv cache dir)
+  if [ -n "$p" ]; then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  printf '%s\n' "$HOME/Library/Caches/uv" "$HOME/.cache/uv"
+}
+
+paths_du_kb() {
+  total=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    total=$((total + $(du_kb "$p")))
+  done
+  printf '%s\n' "$total"
+}
+
+init_safety() {
+  HOME_REAL=$(canonical_dir "$HOME") || {
+    echo "cannot resolve HOME: $HOME" >&2
+    exit 1
+  }
+  ALLOW_PREFIXES="${HOME_REAL}/Library/Caches
+${HOME_REAL}/Library/Developer
+${HOME_REAL}/Library/Logs
+${HOME_REAL}/Library/pnpm
+${HOME_REAL}/.npm
+${HOME_REAL}/.local
+${HOME_REAL}/.cache
+${HOME_REAL}/.bun
+${HOME_REAL}/.yarn
+"
+  if have brew; then
+    bc=$(first_line brew --cache) || bc=
+    if [ -n "$bc" ]; then
+      ALLOW_PREFIXES="${ALLOW_PREFIXES}${bc}
+"
+    fi
+  fi
+}
+
+path_is_allowed_real() {
+  real=$1
+  [ -n "$real" ] || return 1
+  [ "$real" != / ] || return 1
+  [ "$real" != "$HOME_REAL" ] || return 1
+  while IFS= read -r prefix; do
+    [ -n "$prefix" ] || continue
+    case "$real" in
+      "$prefix"|"$prefix"/*) return 0 ;;
+    esac
+  done <<EOF
+$ALLOW_PREFIXES
+EOF
+  return 1
+}
+
+path_is_allowed() {
+  [ -d "$1" ] || return 1
+  real=$(canonical_dir "$1") || return 1
+  path_is_allowed_real "$real"
+}
+
+# Remove directory contents, keep the directory.
+# Refuses /, $HOME, and paths outside the cache allowlist.
+clear_dir() {
+  [ -d "$1" ] || return 0
+  real=$(canonical_dir "$1") || return 1
+  if ! path_is_allowed_real "$real"; then
+    echo "refusing to delete unsafe path: $1" >&2
+    return 1
+  fi
+  find "$real" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+}
+
+clear_paths_from() {
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    run_ok clear_dir "$p"
+  done <<EOF
+$1
+EOF
+}
+
+plan_init() {
+  PLAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/consuela.XXXXXX")
+  PLAN_COUNT=0
+}
+
+plan_rec() {
+  printf '%s/%04d' "$PLAN_DIR" "$1"
+}
+
+add() {
+  group=$1
+  kb=${2:-0}
+  label=$3
+  action=$4
+  arg=${5-}
+  case "$kb" in
+    ''|*[!0-9]*) kb=0 ;;
+  esac
+  [ "$kb" -gt 0 ] || return 0
+  PLAN_COUNT=$((PLAN_COUNT + 1))
+  rec=$(plan_rec "$PLAN_COUNT")
+  mkdir "$rec"
+  printf '%s\n' "$group" >"$rec/group"
+  printf '%s\n' "$kb" >"$rec/kb"
+  fmt_kb "$kb" >"$rec/size"
+  printf '%s\n' "$label" >"$rec/label"
+  printf '%s\n' "$action" >"$rec/action"
+  printf '%s' "$arg" >"$rec/arg"
+}
+
+sum_plan_kb() {
+  s=0
+  i=1
+  while [ "$i" -le "$PLAN_COUNT" ]; do
+    rec=$(plan_rec "$i")
+    kb=$(sed -n '1p' "$rec/kb")
+    s=$((s + kb))
+    i=$((i + 1))
+  done
+  printf '%s\n' "$s"
+}
+
+print_plan() {
+  i=1
+  while [ "$i" -le "$PLAN_COUNT" ]; do
+    rec=$(plan_rec "$i")
+    printf '  %8s  %s\n' "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
+    i=$((i + 1))
+  done
+}
+
+run_ok() {
+  if "$@"; then
+    return 0
+  fi
+  echo "  failed (continuing)"
+  return 0
+}
+
+# Prints "unavailable_devices <kb>" and "unavailable_runtime <kb> <id>" lines.
+# Failures warn on stderr and omit that line; they are not treated as 0 KB success.
+run_simctl_scan() {
+  if ! have python3; then
+    warn "python3 not found; skipping unavailable simulator scan"
+    return 0
+  fi
+  python3 - <<'PY'
+import json, os, subprocess, sys
+
+FIXTURES = {
+    ("list", "devices", "-j"): "CONSUELA_FIXTURE_DEVICES",
+    ("runtime", "list", "-j"): "CONSUELA_FIXTURE_RUNTIME_IMAGES",
+    ("list", "runtimes", "-j"): "CONSUELA_FIXTURE_RUNTIMES",
+}
+
+def read_bytes(args):
+    envkey = FIXTURES.get(tuple(args))
+    path = os.environ.get(envkey) if envkey else None
+    if path:
+        with open(path, "rb") as f:
+            return f.read()
+    return subprocess.check_output(
+        ["xcrun", "simctl"] + list(args), stderr=subprocess.DEVNULL
+    )
+
+def load_json(args, what):
+    data = json.loads(read_bytes(args))
+    if not isinstance(data, dict):
+        raise TypeError("%s JSON must be an object, got %s" % (what, type(data).__name__))
+    return data
+
+def du_kb(path):
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        out = subprocess.check_output(["du", "-sk", path], stderr=subprocess.DEVNULL)
+        return int(out.split()[0])
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return 0
+
+try:
+    data = load_json(["list", "devices", "-j"], "devices")
+    dev_kb = 0
+    for devices in data.get("devices", {}).values():
+        for dev in devices:
+            if dev.get("isAvailable", True):
+                continue
+            size = dev.get("dataPathSize") or 0
+            if size:
+                dev_kb += int(size) // 1024
+            else:
+                dev_kb += du_kb(dev.get("dataPath") or "")
+    print("unavailable_devices %d" % dev_kb)
+except Exception as e:
+    print("warning: could not scan unavailable simulators: %s" % e, file=sys.stderr)
+
+try:
+    raw = load_json(["runtime", "list", "-j"], "runtime images")
+    images = {}
+    for img in raw.values():
+        if not isinstance(img, dict):
+            continue
+        images[img.get("runtimeIdentifier")] = img
+        images[img.get("identifier")] = img
+    data = load_json(["list", "runtimes", "-j"], "runtimes")
+    for rt in data.get("runtimes", []):
+        if rt.get("isAvailable"):
+            continue
+        ident = rt.get("identifier") or ""
+        img = images.get(ident) or {}
+        delete_id = img.get("identifier") or ident
+        if not delete_id:
+            continue
+        size = img.get("sizeBytes") or 0
+        if size:
+            rt_kb = int(size) // 1024
+        else:
+            rt_kb = du_kb(rt.get("bundlePath") or "")
+        print("unavailable_runtime %d %s" % (rt_kb, delete_id))
+except Exception as e:
+    print("warning: could not scan unavailable runtimes: %s" % e, file=sys.stderr)
+PY
+}
+
+scan_xcode() {
+  if have xcrun; then
+    XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
+    add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
+
+    scan_out=$(run_simctl_scan) || scan_out=
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in
+        unavailable_devices\ *)
+          kb=${line#unavailable_devices }
+          add xcode "$kb" "Unavailable simulators (simctl delete unavailable)" simctl_unavailable
+          ;;
+        unavailable_runtime\ *)
+          rest=${line#unavailable_runtime }
+          kb=${rest%% *}
+          ident=${rest#"$kb"}
+          ident=${ident# }
+          [ -n "$ident" ] || continue
+          short=${ident##*.}
+          add xcode "$kb" "Unavailable runtime $short" runtime_unavailable "$ident"
+          ;;
+      esac
+    done <<EOF
+$scan_out
+EOF
+  elif [ "$DO_CACHE" -eq 0 ] && [ "$DO_DOCKER" -eq 0 ]; then
+    echo "xcrun not found. Install Xcode or Command Line Tools." >&2
+    exit 1
+  else
+    warn "xcrun not found; skipping simulator cleanup"
+  fi
+
+  add xcode "$(du_kb "$HOME/Library/Developer/Xcode/DerivedData")" \
+    "DerivedData" clear_dir "$HOME/Library/Developer/Xcode/DerivedData"
+  add xcode "$(du_kb "$HOME/Library/Developer/CoreSimulator/Caches")" \
+    "CoreSimulator caches" clear_dir "$HOME/Library/Developer/CoreSimulator/Caches"
+  add xcode "$(du_kb "$HOME/Library/Logs/CoreSimulator")" \
+    "Simulator logs" clear_dir "$HOME/Library/Logs/CoreSimulator"
+  add xcode "$(du_kb "$HOME/Library/Caches/com.apple.dt.xcodebuild")" \
+    "xcodebuild cache" clear_dir "$HOME/Library/Caches/com.apple.dt.xcodebuild"
+  add xcode "$(du_kb "$HOME/Library/Caches/org.swift.swiftpm")" \
+    "SwiftPM cache" clear_dir "$HOME/Library/Caches/org.swift.swiftpm"
+
+  cocoapods="$HOME/Library/Caches/CocoaPods"
+  if have pod; then
+    add xcode "$(du_kb "$cocoapods")" "CocoaPods cache clean --all" cocoapods "$cocoapods"
+  else
+    add xcode "$(du_kb "$cocoapods")" "CocoaPods cache directory" clear_dir "$cocoapods"
+  fi
+}
+
+scan_cache() {
+  npm_cache=$(cache_path_or_default "$HOME/.npm" npm config get cache)
+  if have npm; then
+    add cache "$(du_kb "$npm_cache")" "npm cache clean --force" npm_clean "$npm_cache"
+  else
+    add cache "$(du_kb "$npm_cache")" "npm cache directory" clear_dir "$npm_cache"
+  fi
+
+  yarn_arg=$(yarn_cache_paths)
+  yarn_kb=$(printf '%s\n' "$yarn_arg" | paths_du_kb)
+  if have yarn; then
+    add cache "$yarn_kb" "Yarn cache clean" yarn_clean "$yarn_arg"
+  else
+    add cache "$yarn_kb" "Yarn cache directories" clear_dir "$yarn_arg"
+  fi
+
+  pnpm_store=$(cache_path_or_default "$HOME/Library/pnpm/store" pnpm store path)
+  if have pnpm; then
+    add cache "$(du_kb "$pnpm_store")" \
+      "pnpm store prune (unreferenced packages)" pnpm_prune "$pnpm_store"
+  fi
+
+  bun_cache="$HOME/.bun/install/cache"
+  add cache "$(du_kb "$bun_cache")" "Bun install cache" clear_dir "$bun_cache"
+
+  pip_cache=$(cache_path_or_default "$HOME/Library/Caches/pip" python3 -m pip cache dir)
+  if python3 -m pip cache dir >/dev/null 2>&1; then
+    add cache "$(du_kb "$pip_cache")" "pip cache purge" pip_purge "$pip_cache"
+  else
+    add cache "$(du_kb "$pip_cache")" "pip cache directory" clear_dir "$pip_cache"
+  fi
+
+  uv_arg=$(uv_cache_paths)
+  uv_kb=$(printf '%s\n' "$uv_arg" | paths_du_kb)
+  if have uv; then
+    add cache "$uv_kb" "uv cache clean" uv_clean "$uv_arg"
+  else
+    add cache "$uv_kb" "uv cache directories" clear_dir "$uv_arg"
+  fi
+
+  brew_cache=$(cache_path_or_default "$HOME/Library/Caches/Homebrew" brew --cache)
+  add cache "$(du_kb "$brew_cache")" "Homebrew download cache" clear_dir "$brew_cache"
+}
+
+scan_docker() {
+  if ! have docker; then
+    warn "docker not found; skipping docker cleanup"
+    return 0
+  fi
+  df_out=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null) || {
+    warn "docker is not reachable; skipping docker cleanup"
+    return 0
+  }
+  docker_kb=$(
+    printf '%s\n' "$df_out" | awk -F '\t' '
+      function to_kb(s,   n, u) {
+        gsub(/ .*/, "", s)
+        n = s + 0
+        u = s
+        gsub(/[0-9.]/, "", u)
+        u = toupper(u)
+        if (u == "B") return n / 1024
+        if (u == "KB" || u == "KIB" || u == "K") return n
+        if (u == "MB" || u == "MIB" || u == "M") return n * 1024
+        if (u == "GB" || u == "GIB" || u == "G") return n * 1024 * 1024
+        if (u == "TB" || u == "TIB" || u == "T") return n * 1024 * 1024 * 1024
+        return 0
+      }
+      $1 == "Local Volumes" { next }
+      { kb += to_kb($2) }
+      END { printf "%d", kb }
+    '
+  )
+  if [ "$DOCKER_MODE" = dangling ]; then
+    add docker "$docker_kb" \
+      "Docker dangling images, containers, build cache; volumes kept" \
+      docker_dangling
+  else
+    add docker "$docker_kb" \
+      "Docker unused images (including tagged), containers, build cache; volumes kept" \
+      docker_all
+  fi
+}
+
+run_action() {
+  action=$1
+  arg=$2
+  case "$action" in
+    xctest)
+      if [ -d "$arg" ]; then
+        if path_is_allowed "$arg"; then
+          run_ok xcrun simctl --set "$arg" delete all
+        else
+          echo "refusing to delete unsafe path: $arg" >&2
+        fi
+      fi
+      ;;
+    simctl_unavailable)
+      run_ok xcrun simctl delete unavailable
+      ;;
+    runtime_unavailable)
+      run_ok xcrun simctl runtime delete "$arg"
+      ;;
+    clear_dir)
+      clear_paths_from "$arg"
+      ;;
+    cocoapods)
+      if have pod; then
+        if ! pod cache clean --all >/dev/null 2>&1; then
+          run_ok clear_dir "$arg"
+        fi
+      else
+        run_ok clear_dir "$arg"
+      fi
+      ;;
+    npm_clean)
+      run_ok npm cache clean --force
+      ;;
+    yarn_clean)
+      if yarn cache clean --all; then
+        :
+      else
+        run_ok yarn cache clean
+      fi
+      ;;
+    pnpm_prune)
+      run_ok pnpm store prune
+      ;;
+    pip_purge)
+      if python3 -m pip cache purge; then
+        :
+      else
+        echo "  pip cache purge failed, deleting $arg"
+        run_ok clear_dir "$arg"
+      fi
+      ;;
+    uv_clean)
+      run_ok uv cache clean
+      ;;
+    docker_all)
+      run_ok docker system prune -af
+      ;;
+    docker_dangling)
+      run_ok docker system prune -f
+      ;;
+    *)
+      warn "unknown action $action"
+      ;;
+  esac
+}
+
+run_plan() {
+  i=1
+  while [ "$i" -le "$PLAN_COUNT" ]; do
+    rec=$(plan_rec "$i")
+    label=$(sed -n '1p' "$rec/label")
+    action=$(sed -n '1p' "$rec/action")
+    arg=$(cat "$rec/arg")
+    echo "Cleaning $label..."
+    run_action "$action" "$arg"
+    i=$((i + 1))
+  done
+}
+
+consuela_main() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    echo "consuela only runs on macOS." >&2
+    exit 1
+  fi
+
+  DO_XCODE=0
+  DO_CACHE=0
+  DO_DOCKER=0
+  DOCKER_MODE=all
+  ANY_GROUP=0
+  YES=0
+  DRY_RUN=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --xcode) DO_XCODE=1; ANY_GROUP=1 ;;
+      --cache|--caches) DO_CACHE=1; ANY_GROUP=1 ;;
+      --docker|--docker-all) DO_DOCKER=1; ANY_GROUP=1; DOCKER_MODE=all ;;
+      --docker-dangling) DO_DOCKER=1; ANY_GROUP=1; DOCKER_MODE=dangling ;;
+      -y|--yes) YES=1 ;;
+      --dry-run) DRY_RUN=1 ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$ANY_GROUP" -eq 0 ]; then
+    DO_XCODE=1
+    DO_CACHE=1
+    DO_DOCKER=1
+  fi
+
+  plan_init
+  trap 'rm -rf "$PLAN_DIR"' EXIT
+
+  echo "Scanning..."
+
+  if [ "$DO_XCODE" -eq 1 ]; then
+    scan_xcode
+  fi
+  if [ "$DO_CACHE" -eq 1 ]; then
+    scan_cache
+  fi
+  if [ "$DO_DOCKER" -eq 1 ]; then
+    scan_docker
+  fi
+
+  run_kb=$(sum_plan_kb)
+
+  echo
+  printf 'This run:   %s\n' "$(fmt_kb "$run_kb")"
+
+  if [ "$run_kb" -le 0 ]; then
+    echo
+    echo "Nothing to clean."
+    exit 0
+  fi
+
+  echo
+  print_plan
+  echo
+
+  if [ "$DO_XCODE" -eq 1 ]; then
+    echo "Do not run this while Xcode tests are executing."
+  fi
+
+  if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
+    echo "DOCKER_HOST=$DOCKER_HOST"
+    echo "Cleanup targets that Docker daemon, which may be remote."
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "Dry run: nothing deleted."
+    exit 0
+  fi
+
+  need_confirm=0
+  if [ "$YES" -eq 0 ]; then
+    need_confirm=1
+  fi
+  if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
+    need_confirm=1
+  fi
+
+  if [ "$need_confirm" -eq 1 ]; then
+    printf 'Proceed? [y/N] '
+    read -r ans || ans=n
+    echo
+    case "$ans" in
+      y|Y|yes|YES) ;;
+      *)
+        echo "Aborted."
+        exit 0
+        ;;
+    esac
+  fi
+
+  echo
+  run_plan
+  echo "Done."
+}
+
+init_safety
+
+# Sourced by tests: return. Executed: run main. SC2317 is a false positive.
+# shellcheck disable=SC2317
+return 0 2>/dev/null || consuela_main "$@"
