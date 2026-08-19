@@ -1,0 +1,20 @@
+{
+  "devices": {
+    "com.apple.CoreSimulator.SimRuntime.iOS-17-0": [
+      {
+        "dataPath": "/tmp/consuela-fake-sim-unavailable",
+        "dataPathSize": 1048576,
+        "udid": "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB",
+        "isAvailable": false,
+        "name": "iPhone 15"
+      },
+      {
+        "dataPath": "/tmp/consuela-fake-sim-available",
+        "dataPathSize": 99999999,
+        "udid": "CCCCCCCC-1111-2222-3333-DDDDDDDDDDDD",
+        "isAvailable": true,
+        "name": "iPhone 14"
+      }
+    ]
+  }
+}

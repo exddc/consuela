@@ -88,6 +88,16 @@ With group flags, consuela scans only those groups.
 
 Disk Utility may still report the old free space until Time Machine local snapshots expire. The delay is not a failed cleanup.
 
+## Tests
+
+From a clone:
+
+```sh
+./tests/run.sh
+```
+
+The suite runs [shellcheck](https://www.shellcheck.net/), checks `fmt_kb` and plan records, refuses `clear_dir` of `$HOME` and `/`, and runs the simulator JSON fixtures.
+
 ## Contributing
 
 Pull requests are welcome if you have a command that you think would be useful to add.
