@@ -41,7 +41,9 @@ Package-manager caches only. See Cleanup policy for the exact command on each pl
 
 - Dangling images, stopped containers, and build cache (`docker system prune -f`)
 
-Reclaimable size for Docker comes from `docker system df`. `prune -a` can free more than that figure because unused tagged images are included in the delete but not always in the df reclaimable column.
+The Docker line is an estimate (`~`). consuela adds the Images, Containers, and Build Cache rows of the reclaimable column in `docker system df`. Those rows count images that no container uses, tagged or dangling, stopped containers, and build cache that is not in use. The real amount can be higher or lower. For example, df counts an image as in use while a stopped container refers to it, but prune removes that container first and can then remove the image.
+
+`--docker` removes all of those. `--docker-dangling` keeps tagged images and some build cache, so it usually frees less than the estimate.
 
 consuela resolves the Docker context once, the same way the `docker` command does. The lookup follows `DOCKER_HOST`, `DOCKER_CONTEXT`, and `docker context use`. The scan and the prune both use that context, and the plan shows its endpoint. Any `unix://` socket counts as local. With `-y`, consuela skips Docker cleanup when the endpoint is not a `unix://` socket or cannot be read. Run consuela without `-y` to confirm a remote cleanup at the prompt.
 
@@ -80,7 +82,7 @@ Disk Utility may still report the old free space until Time Machine local snapsh
 
 ## Cleanup policy
 
-Each plan line names the operation that will run.
+Each plan line names the operation that will run. A `~` before a size marks an estimate. The command on that line can free more or less than shown. The "This run" line lists estimated sizes separately.
 
 - **Wipe directory contents** (`clear_dir`): delete everything inside a cache directory, keep the directory. Used for DerivedData, CoreSimulator caches, simulator logs, xcodebuild, SwiftPM, Bun's install cache, Homebrew's download cache, and for npm/Yarn/pip/uv/CocoaPods when the tool is not on PATH.
 - **Allowlist**: consuela resolves symlinks before it wipes a directory or deletes XCTestDevices. The resolved path must match one of these entries:
@@ -88,7 +90,7 @@ Each plan line names the operation that will run.
   - The directory itself or inside: `~/Library/Developer/Xcode/DerivedData`, `~/Library/Developer/CoreSimulator/Caches`, `~/Library/Developer/XCTestDevices`, `~/Library/Logs/CoreSimulator`, `~/.npm`, `~/.bun/install/cache`, `~/.yarn/cache`
   - Any other path is skipped with a warning during the scan. `/` and `$HOME` are never allowed.
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).
-- **pnpm**: `pnpm store prune` only. That removes packages no project references. It does not delete the store directory. If pnpm is not installed, consuela leaves the store alone.
+- **pnpm**: `pnpm store prune` only. That removes packages no project references. It does not delete the store directory. The size shown is the whole store, marked `~` as an estimate. If pnpm is not installed, consuela leaves the store alone.
 - **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay. A custom `brew --cache` outside the allowlist is skipped.
 - **Docker**: `docker system prune -af` for `--docker` / `--docker-all`, or `docker system prune -f` for `--docker-dangling`. Neither command removes volumes.
 
