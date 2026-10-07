@@ -19,9 +19,8 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the confirmation prompt; still asks when
-                      DOCKER_HOST is set or Xcode, Simulator, or
-                      xcodebuild is running
+  -y, --yes           skip the prompt; still asks when a safety check
+                      applies (see README)
   --dry-run           print the plan and exit 0 without deleting
 EOF
 }
@@ -232,27 +231,25 @@ print_plan() {
 }
 
 plan_has_group() {
-  i=1
-  while [ "$i" -le "$PLAN_COUNT" ]; do
-    rec=$(plan_rec "$i")
-    [ "$(sed -n '1p' "$rec/group")" != "$1" ] || return 0
-    i=$((i + 1))
-  done
-  return 1
+  grep -qxF -- "$1" "$PLAN_DIR"/*/group 2>/dev/null
 }
 
-running_xcode_procs() {
+running_xcode_tools() {
   if ! have pgrep; then
-    warn "pgrep not found; cannot detect running Xcode"
-    return 0
+    warn "pgrep not found"
+    return 1
   fi
-  found=
-  for name in Xcode Simulator xcodebuild; do
-    if pgrep -x "$name" >/dev/null 2>&1; then
-      found="${found:+$found, }$name"
+  procs=$(pgrep -lx -u "$(id -u)" 'Xcode|Simulator|xcodebuild|launchd_sim') || {
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      return 0
     fi
-  done
-  printf '%s' "$found"
+    warn "pgrep exited $rc"
+    return 1
+  }
+  printf '%s\n' "$procs" |
+    awk '{ print ($2 == "launchd_sim" ? "booted simulator" : $2) }' |
+    LC_ALL=C sort -u | paste -sd ',' - | sed 's/,/, /g'
 }
 
 run_ok() {
@@ -635,13 +632,20 @@ consuela_main() {
   print_plan
   echo
 
-  xcode_running=
+  need_confirm=$((1 - YES))
+
+  xcode_guard=
   if plan_has_group xcode; then
-    xcode_running=$(running_xcode_procs)
-    if [ -n "$xcode_running" ]; then
-      echo "Running: $xcode_running"
-      echo "Quit them first, or Xcode builds, tests, and indexes may break."
-    else
+    if ! xcode_tools=$(running_xcode_tools); then
+      xcode_guard="Xcode tool check failed"
+      echo "$xcode_guard. Make sure Xcode, Simulator, booted simulators, and xcodebuild are stopped."
+      need_confirm=1
+    elif [ -n "$xcode_tools" ]; then
+      xcode_guard="Xcode tools running: $xcode_tools"
+      echo "$xcode_guard"
+      echo "Stop them before you continue."
+      need_confirm=1
+    elif [ "$DRY_RUN" -eq 0 ]; then
       echo "Do not start Xcode builds or tests until cleanup finishes."
     fi
   fi
@@ -649,6 +653,7 @@ consuela_main() {
   if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
     echo "DOCKER_HOST=$DOCKER_HOST"
     echo "Cleanup targets that Docker daemon, which may be remote."
+    need_confirm=1
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -656,18 +661,10 @@ consuela_main() {
     exit 0
   fi
 
-  need_confirm=0
-  if [ "$YES" -eq 0 ]; then
-    need_confirm=1
-  fi
-  if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
-    need_confirm=1
-  fi
-  if [ -n "$xcode_running" ]; then
-    need_confirm=1
-  fi
-
   if [ "$need_confirm" -eq 1 ]; then
+    if [ "$YES" -eq 1 ] && [ -n "$xcode_guard" ] && [ ! -t 0 ]; then
+      echo "-y ignored: $xcode_guard" >&2
+    fi
     printf 'Proceed? [y/N] '
     read -r ans || ans=n
     echo
