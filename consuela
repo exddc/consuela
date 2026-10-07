@@ -240,7 +240,7 @@ fmt_run_total() {
 
 print_plan() {
   pad=
-  if [ "$(sum_plan_kb estimate)" -gt 0 ]; then
+  if [ "${1:-0}" -gt 0 ]; then
     pad=' '
   fi
   i=1
@@ -634,7 +634,7 @@ consuela_main() {
   fi
 
   echo
-  print_plan
+  print_plan "$estimate_kb"
   echo
 
   if [ "$DO_XCODE" -eq 1 ]; then
