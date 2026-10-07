@@ -8,8 +8,9 @@ usage: install.sh [script-url]
 
 Installs consuela into CONSUELA_BIN (default: ~/.local/bin).
 
-With no URL, copies ./consuela when this script runs from a clone;
-otherwise downloads from GitHub (exddc/consuela).
+With no URL argument and no CONSUELA_URL, copies ./consuela when this
+script runs from a clone. Otherwise downloads the given URL, or the
+default from GitHub (exddc/consuela).
 
 Environment:
   CONSUELA_BIN      install directory
@@ -61,7 +62,8 @@ consuela_install_main() {
 
   BIN_DIR="${CONSUELA_BIN:-$HOME/.local/bin}"
   DEFAULT_URL="https://raw.githubusercontent.com/exddc/consuela/main/consuela"
-  SRC_URL="${1:-${CONSUELA_URL:-$DEFAULT_URL}}"
+  SRC_URL="${1:-${CONSUELA_URL:-}}"
+  LOCAL_SCRIPT="$(dirname -- "$0")/consuela"
   DEST="$BIN_DIR/consuela"
 
   mkdir -p "$BIN_DIR"
@@ -69,10 +71,10 @@ consuela_install_main() {
   trap 'rm -f "$tmp"' EXIT
 
   # Piped `curl | sh` sets $0 to `sh`, so only copy from a local clone.
-  if [ "${0##*/}" = "install.sh" ] && [ -f "$(dirname -- "$0")/consuela" ]; then
-    cp "$(dirname -- "$0")/consuela" "$tmp"
+  if [ -z "$SRC_URL" ] && [ "${0##*/}" = "install.sh" ] && [ -f "$LOCAL_SCRIPT" ]; then
+    cp "$LOCAL_SCRIPT" "$tmp"
   else
-    curl -fsSL "$SRC_URL" -o "$tmp"
+    curl -fsSL "${SRC_URL:-$DEFAULT_URL}" -o "$tmp"
   fi
 
   verify_downloaded_script "$tmp"
