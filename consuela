@@ -32,6 +32,18 @@ warn() {
   echo "warning: $*" >&2
 }
 
+# Tools in /usr/bin such as xcrun and python3 are stubs that open an install
+# dialog when xcode-select has no developer directory.
+have_dev_tool() {
+  tool=$(command -v "$1" 2>/dev/null) || return 1
+  [ "$(canonical_dir "${tool%/*}")" = /usr/bin ] || return 0
+  xcode-select -p >/dev/null 2>&1
+}
+
+xcode_ready() {
+  have_dev_tool xcrun && xcrun --find simctl >/dev/null 2>&1
+}
+
 # Kilobytes occupied by a path. Missing paths are 0.
 du_kb() {
   if [ ! -e "$1" ]; then
@@ -240,8 +252,8 @@ run_ok() {
 # Prints "unavailable_devices <kb>" and "unavailable_runtime <kb> <id>" lines.
 # Failures warn on stderr and omit that line; they are not treated as 0 KB success.
 run_simctl_scan() {
-  if ! have python3; then
-    warn "python3 not found; skipping unavailable simulator scan"
+  if ! have_dev_tool python3; then
+    warn "python3 not available; skipping unavailable simulator scan"
     return 0
   fi
   python3 - <<'PY'
@@ -323,7 +335,7 @@ PY
 }
 
 scan_xcode() {
-  if have xcrun; then
+  if xcode_ready; then
     XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
     add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
 
@@ -348,11 +360,8 @@ scan_xcode() {
     done <<EOF
 $scan_out
 EOF
-  elif [ "$DO_CACHE" -eq 0 ] && [ "$DO_DOCKER" -eq 0 ]; then
-    echo "xcrun not found. Install Xcode or Command Line Tools." >&2
-    exit 1
   else
-    warn "xcrun not found; skipping simulator cleanup"
+    warn "Xcode not found; skipping XCTestDevices, unavailable simulators, and unavailable runtimes. Install Xcode to clean them."
   fi
 
   add xcode "$(du_kb "$HOME/Library/Developer/Xcode/DerivedData")" \
@@ -399,10 +408,14 @@ scan_cache() {
   bun_cache="$HOME/.bun/install/cache"
   add cache "$(du_kb "$bun_cache")" "Bun install cache" clear_dir "$bun_cache"
 
-  pip_cache=$(cache_path_or_default "$HOME/Library/Caches/pip" python3 -m pip cache dir)
-  if python3 -m pip cache dir >/dev/null 2>&1; then
+  pip_cache=
+  if have_dev_tool python3; then
+    pip_cache=$(first_line python3 -m pip cache dir)
+  fi
+  if [ -n "$pip_cache" ]; then
     add cache "$(du_kb "$pip_cache")" "pip cache purge" pip_purge "$pip_cache"
   else
+    pip_cache="$HOME/Library/Caches/pip"
     add cache "$(du_kb "$pip_cache")" "pip cache directory" clear_dir "$pip_cache"
   fi
 
