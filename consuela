@@ -645,6 +645,9 @@ consuela_main() {
     DO_DOCKER=1
   fi
 
+  # Project config in the caller's directory must not redirect cache commands.
+  cd -- "$HOME_REAL"
+
   plan_init
   trap 'rm -rf "$PLAN_DIR"' EXIT
 
