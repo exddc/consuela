@@ -19,8 +19,8 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the confirmation prompt; still asks when Docker
-                      does not use a local unix:// socket
+  -y, --yes           skip the confirmation prompt; Docker cleanup is skipped
+                      unless Docker uses a local unix:// socket
   --dry-run           print the plan and exit 0 without deleting
 EOF
 }
@@ -230,22 +230,6 @@ print_plan() {
   done
 }
 
-plan_has_group() {
-  i=1
-  while [ "$i" -le "$PLAN_COUNT" ]; do
-    rec=$(plan_rec "$i")
-    [ "$(sed -n '1p' "$rec/group")" = "$1" ] && return 0
-    i=$((i + 1))
-  done
-  return 1
-}
-
-# With no name, context inspect resolves DOCKER_HOST, DOCKER_CONTEXT, and the current context.
-docker_endpoint() {
-  out=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
-  printf '%s\n' "$out" | sed -n '1p'
-}
-
 run_ok() {
   if "$@"; then
     return 0
@@ -440,7 +424,27 @@ scan_docker() {
     warn "docker not found; skipping docker cleanup"
     return 0
   fi
-  df_out=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null) || {
+  # Without a name, inspects the context docker commands would use.
+  ctx_line=$(first_line docker context inspect --format '{{.Name}} {{.Endpoints.docker.Host}}')
+  ctx=${ctx_line%% *}
+  endpoint=${ctx_line#* }
+  if [ -z "$ctx" ]; then
+    warn "cannot resolve the docker context; skipping docker cleanup"
+    return 0
+  fi
+  case "$endpoint" in
+    ''|'<no value>') endpoint=unknown ;;
+  esac
+  case "$endpoint" in
+    unix://*) ;;
+    *)
+      if [ "$YES" -eq 1 ]; then
+        warn "docker endpoint $endpoint is not a local unix:// socket; skipping docker cleanup. Run without -y to confirm."
+        return 0
+      fi
+      ;;
+  esac
+  df_out=$(docker --context "$ctx" system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null) || {
     warn "docker is not reachable; skipping docker cleanup"
     return 0
   }
@@ -467,11 +471,14 @@ scan_docker() {
   if [ "$DOCKER_MODE" = dangling ]; then
     add docker "$docker_kb" \
       "Docker dangling images, containers, build cache; volumes kept" \
-      docker_dangling
+      docker_dangling "$ctx"
   else
     add docker "$docker_kb" \
       "Docker unused images (including tagged), containers, build cache; volumes kept" \
-      docker_all
+      docker_all "$ctx"
+  fi
+  if [ "$docker_kb" -gt 0 ]; then
+    DOCKER_TARGET="$endpoint (context $ctx)"
   fi
 }
 
@@ -531,10 +538,10 @@ run_action() {
       run_ok uv cache clean
       ;;
     docker_all)
-      run_ok docker system prune -af
+      run_ok docker --context "$arg" system prune -af
       ;;
     docker_dangling)
-      run_ok docker system prune -f
+      run_ok docker --context "$arg" system prune -f
       ;;
     *)
       warn "unknown action $action"
@@ -565,6 +572,7 @@ consuela_main() {
   DO_CACHE=0
   DO_DOCKER=0
   DOCKER_MODE=all
+  DOCKER_TARGET=
   ANY_GROUP=0
   YES=0
   DRY_RUN=0
@@ -630,17 +638,8 @@ consuela_main() {
     echo "Do not run this while Xcode tests are executing."
   fi
 
-  docker_confirm=0
-  if plan_has_group docker; then
-    endpoint=$(docker_endpoint) || endpoint=
-    case "$endpoint" in
-      unix://*) ;;
-      *)
-        docker_confirm=1
-        echo "Docker endpoint: ${endpoint:-unknown}"
-        echo "Docker cleanup may target a remote daemon."
-        ;;
-    esac
+  if [ -n "$DOCKER_TARGET" ]; then
+    echo "Docker endpoint: $DOCKER_TARGET"
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -648,15 +647,7 @@ consuela_main() {
     exit 0
   fi
 
-  need_confirm=0
   if [ "$YES" -eq 0 ]; then
-    need_confirm=1
-  fi
-  if [ "$docker_confirm" -eq 1 ]; then
-    need_confirm=1
-  fi
-
-  if [ "$need_confirm" -eq 1 ]; then
     printf 'Proceed? [y/N] '
     read -r ans || ans=n
     echo
