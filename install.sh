@@ -8,8 +8,9 @@ usage: install.sh [script-url]
 
 Installs consuela into CONSUELA_BIN (default: ~/.local/bin).
 
-With no URL, copies ./consuela when this script runs from a clone;
-otherwise downloads from GitHub (exddc/consuela).
+The script-url argument wins over CONSUELA_URL. With neither, a run
+from a clone copies the consuela file next to install.sh. Otherwise
+it downloads from GitHub (exddc/consuela).
 
 Environment:
   CONSUELA_BIN      install directory
@@ -61,18 +62,21 @@ consuela_install_main() {
 
   BIN_DIR="${CONSUELA_BIN:-$HOME/.local/bin}"
   DEFAULT_URL="https://raw.githubusercontent.com/exddc/consuela/main/consuela"
-  SRC_URL="${1:-${CONSUELA_URL:-$DEFAULT_URL}}"
+  URL_OVERRIDE="${1:-${CONSUELA_URL:-}}"
+  LOCAL_SCRIPT="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/consuela"
   DEST="$BIN_DIR/consuela"
 
   mkdir -p "$BIN_DIR"
   tmp=$(mktemp "${TMPDIR:-/tmp}/consuela.XXXXXX")
   trap 'rm -f "$tmp"' EXIT
 
-  # Piped `curl | sh` sets $0 to `sh`, so only copy from a local clone.
-  if [ "${0##*/}" = "install.sh" ] && [ -f "$(dirname -- "$0")/consuela" ]; then
-    cp "$(dirname -- "$0")/consuela" "$tmp"
+  # `curl | sh` sets $0 to sh.
+  if [ -z "$URL_OVERRIDE" ] && [ "${0##*/}" = "install.sh" ] && [ -f "$LOCAL_SCRIPT" ]; then
+    SOURCE=$LOCAL_SCRIPT
+    cp "$SOURCE" "$tmp"
   else
-    curl -fsSL "$SRC_URL" -o "$tmp"
+    SOURCE="${URL_OVERRIDE:-$DEFAULT_URL}"
+    curl -fsSL "$SOURCE" -o "$tmp"
   fi
 
   verify_downloaded_script "$tmp"
@@ -80,7 +84,7 @@ consuela_install_main() {
   trap - EXIT
   chmod +x "$DEST"
 
-  echo "Installed $DEST"
+  echo "Installed $DEST from $SOURCE"
 
   case ":$PATH:" in
     *":$BIN_DIR:"*)

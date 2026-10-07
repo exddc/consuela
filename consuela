@@ -19,8 +19,9 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the prompt; still asks when a safety check
-                      applies (see README)
+  -y, --yes           skip the prompt; still asks while Xcode tools run;
+                      Docker cleanup is skipped unless Docker uses a
+                      local unix:// socket
   --dry-run           print the plan and exit 0 without deleting
 EOF
 }
@@ -31,6 +32,18 @@ have() {
 
 warn() {
   echo "warning: $*" >&2
+}
+
+# Tools in /usr/bin such as xcrun and python3 are stubs that open an install
+# dialog when xcode-select has no developer directory.
+have_dev_tool() {
+  tool=$(command -v "$1" 2>/dev/null) || return 1
+  [ "$(canonical_dir "${tool%/*}")" = /usr/bin ] || return 0
+  xcode-select -p >/dev/null 2>&1
+}
+
+xcode_ready() {
+  have_dev_tool xcrun && xcrun --find simctl >/dev/null 2>&1
 }
 
 # Kilobytes occupied by a path. Missing paths are 0.
@@ -263,8 +276,8 @@ run_ok() {
 # Prints "unavailable_devices <kb>" and "unavailable_runtime <kb> <id>" lines.
 # Failures warn on stderr and omit that line; they are not treated as 0 KB success.
 run_simctl_scan() {
-  if ! have python3; then
-    warn "python3 not found; skipping unavailable simulator scan"
+  if ! have_dev_tool python3; then
+    warn "python3 not available; skipping unavailable simulator scan"
     return 0
   fi
   python3 - <<'PY'
@@ -346,7 +359,7 @@ PY
 }
 
 scan_xcode() {
-  if have xcrun; then
+  if xcode_ready; then
     XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
     add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
 
@@ -371,11 +384,8 @@ scan_xcode() {
     done <<EOF
 $scan_out
 EOF
-  elif [ "$DO_CACHE" -eq 0 ] && [ "$DO_DOCKER" -eq 0 ]; then
-    echo "xcrun not found. Install Xcode or Command Line Tools." >&2
-    exit 1
   else
-    warn "xcrun not found; skipping simulator cleanup"
+    warn "Xcode not found; skipping XCTestDevices, unavailable simulators, and unavailable runtimes. Install Xcode to clean them."
   fi
 
   add xcode "$(du_kb "$HOME/Library/Developer/Xcode/DerivedData")" \
@@ -422,10 +432,14 @@ scan_cache() {
   bun_cache="$HOME/.bun/install/cache"
   add cache "$(du_kb "$bun_cache")" "Bun install cache" clear_dir "$bun_cache"
 
-  pip_cache=$(cache_path_or_default "$HOME/Library/Caches/pip" python3 -m pip cache dir)
-  if python3 -m pip cache dir >/dev/null 2>&1; then
+  pip_cache=
+  if have_dev_tool python3; then
+    pip_cache=$(first_line python3 -m pip cache dir)
+  fi
+  if [ -n "$pip_cache" ]; then
     add cache "$(du_kb "$pip_cache")" "pip cache purge" pip_purge "$pip_cache"
   else
+    pip_cache="$HOME/Library/Caches/pip"
     add cache "$(du_kb "$pip_cache")" "pip cache directory" clear_dir "$pip_cache"
   fi
 
@@ -446,7 +460,27 @@ scan_docker() {
     warn "docker not found; skipping docker cleanup"
     return 0
   fi
-  df_out=$(docker system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null) || {
+  # Without a name, inspects the context docker commands would use.
+  ctx_line=$(first_line docker context inspect --format '{{.Name}} {{.Endpoints.docker.Host}}')
+  ctx=${ctx_line%% *}
+  endpoint=${ctx_line#* }
+  if [ -z "$ctx" ]; then
+    warn "cannot resolve the docker context; skipping docker cleanup"
+    return 0
+  fi
+  case "$endpoint" in
+    ''|'<no value>') endpoint=unknown ;;
+  esac
+  case "$endpoint" in
+    unix://*) ;;
+    *)
+      if [ "$YES" -eq 1 ]; then
+        warn "docker endpoint $endpoint is not a local unix:// socket; skipping docker cleanup. Run without -y to confirm."
+        return 0
+      fi
+      ;;
+  esac
+  df_out=$(docker --context "$ctx" system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null) || {
     warn "docker is not reachable; skipping docker cleanup"
     return 0
   }
@@ -473,11 +507,14 @@ scan_docker() {
   if [ "$DOCKER_MODE" = dangling ]; then
     add docker "$docker_kb" \
       "Docker dangling images, containers, build cache; volumes kept" \
-      docker_dangling
+      docker_dangling "$ctx"
   else
     add docker "$docker_kb" \
       "Docker unused images (including tagged), containers, build cache; volumes kept" \
-      docker_all
+      docker_all "$ctx"
+  fi
+  if [ "$docker_kb" -gt 0 ]; then
+    DOCKER_TARGET="$endpoint (context $ctx)"
   fi
 }
 
@@ -537,10 +574,10 @@ run_action() {
       run_ok uv cache clean
       ;;
     docker_all)
-      run_ok docker system prune -af
+      run_ok docker --context "$arg" system prune -af
       ;;
     docker_dangling)
-      run_ok docker system prune -f
+      run_ok docker --context "$arg" system prune -f
       ;;
     *)
       warn "unknown action $action"
@@ -571,6 +608,7 @@ consuela_main() {
   DO_CACHE=0
   DO_DOCKER=0
   DOCKER_MODE=all
+  DOCKER_TARGET=
   ANY_GROUP=0
   YES=0
   DRY_RUN=0
@@ -650,10 +688,8 @@ consuela_main() {
     fi
   fi
 
-  if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
-    echo "DOCKER_HOST=$DOCKER_HOST"
-    echo "Cleanup targets that Docker daemon, which may be remote."
-    need_confirm=1
+  if [ -n "$DOCKER_TARGET" ]; then
+    echo "Docker endpoint: $DOCKER_TARGET"
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
