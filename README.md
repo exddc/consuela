@@ -22,6 +22,8 @@ Do not run the Xcode group while Xcode is testing or building.
 
 Available simulators, source code, and installed runtimes that Xcode still uses stay in place.
 
+The first three items need Xcode or the Command Line Tools. Without them, `consuela --xcode` exits with an error. A run that includes other groups skips those three items.
+
 **Caches (`--cache`)**
 
 Package-manager caches only. See Cleanup policy for the exact command on each plan line.
