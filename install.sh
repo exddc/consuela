@@ -47,6 +47,7 @@ verify_downloaded_script() {
   return 0
 }
 
+# `consuela --update` runs this file with no arguments and an absolute CONSUELA_BIN.
 consuela_install_main() {
   if [ "$(uname -s)" != "Darwin" ]; then
     echo "consuela only runs on macOS." >&2
@@ -67,7 +68,7 @@ consuela_install_main() {
   DEST="$BIN_DIR/consuela"
 
   mkdir -p "$BIN_DIR"
-  tmp=$(mktemp "${TMPDIR:-/tmp}/consuela.XXXXXX")
+  tmp=$(mktemp "$BIN_DIR/.consuela.XXXXXX")
   trap 'rm -f "$tmp"' EXIT
 
   # `curl | sh` sets $0 to sh.
@@ -76,15 +77,27 @@ consuela_install_main() {
     cp "$SOURCE" "$tmp"
   else
     SOURCE="${URL_OVERRIDE:-$DEFAULT_URL}"
-    curl -fsSL "$SOURCE" -o "$tmp"
+    curl -fsSL --connect-timeout 10 --max-time 120 "$SOURCE" -o "$tmp"
   fi
 
   verify_downloaded_script "$tmp"
+  if [ -f "$DEST" ] && cmp -s "$tmp" "$DEST"; then
+    echo "$DEST is already up to date."
+    exit 0
+  fi
+  if [ -f "$DEST" ]; then
+    verb=Updated
+  else
+    verb=Installed
+  fi
+  chmod 755 "$tmp"
   mv -f "$tmp" "$DEST"
   trap - EXIT
-  chmod +x "$DEST"
 
-  echo "Installed $DEST from $SOURCE"
+  echo "$verb $DEST from $SOURCE"
+  if [ "$verb" = Updated ]; then
+    exit 0
+  fi
 
   case ":$PATH:" in
     *":$BIN_DIR:"*)
