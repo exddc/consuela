@@ -15,14 +15,16 @@ Do not run the Xcode group while Xcode is testing or building.
 **Xcode (`--xcode`)**
 
 - Throwaway test clones in `~/Library/Developer/XCTestDevices`
-- Simulator devices whose runtime is gone (`xcrun simctl delete unavailable`), only when one Xcode is installed
-- Unavailable simulator runtimes (`xcrun simctl runtime delete`), only when one Xcode is installed
+- Simulator devices whose runtime is gone (`xcrun simctl delete unavailable`), skipped when consuela finds more than one Xcode
+- Unavailable simulator runtimes (`xcrun simctl runtime delete`), skipped when consuela finds more than one Xcode
 - Contents of DerivedData, CoreSimulator caches, simulator logs, xcodebuild cache
 - SwiftPM cache and CocoaPods cache
 
-Available simulators, source code, and installed runtimes that any Xcode consuela finds still uses stay in place.
+consuela keeps available simulators, source code, and runtimes that a found Xcode still uses.
 
-`simctl` decides what is unavailable for the selected Xcode only. Another Xcode, such as Xcode-beta, may still need those simulators and runtimes. When consuela finds more than one Xcode, it keeps them, lists the installs it found, and still cleans the other Xcode items. It looks for Xcode with Spotlight, in `/Applications` and `~/Applications`, and at the `xcode-select` path.
+`simctl` decides what is unavailable for the selected Xcode only. Another Xcode, such as Xcode-beta, may still need those simulators and runtimes. When consuela finds more than one Xcode, it skips `xcrun simctl delete unavailable` and `xcrun simctl runtime delete`, lists the Xcodes it found, and still cleans the other Xcode items. To remove an old runtime yourself, run `xcrun simctl runtime list`, check that no Xcode still needs it, then run `xcrun simctl runtime delete <id>`.
+
+consuela finds Xcode with Spotlight, in `/Applications` and `~/Applications`, and at the `xcode-select` path. It ignores Xcodes in the Trash. An Xcode on another mounted volume counts only if Spotlight reports it or it is the selected Xcode. If Spotlight reports no Xcode, consuela warns that it checked only those folders and the selected Xcode.
 
 **Caches (`--cache`)**
 

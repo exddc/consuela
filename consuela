@@ -11,7 +11,7 @@ usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling
 With no group flags, scans and cleans every group after confirmation.
 
   --xcode             XCTestDevices, unavailable simulators and runtimes
-                      (skipped when more than one Xcode is installed),
+                      (skipped when consuela finds more than one Xcode),
                       DerivedData, CoreSimulator caches, simulator logs,
                       xcodebuild cache, SwiftPM cache, CocoaPods cache
   --cache             npm, Yarn, pnpm, Bun, pip, uv, Homebrew download cache
@@ -323,22 +323,44 @@ except Exception as e:
 PY
 }
 
-xcode_apps() {
-  {
-    if have mdfind; then
-      mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null || :
-    fi
-    for app in /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app; do
-      printf '%s\n' "$app"
-    done
-    dev=$(first_line xcode-select -p) || dev=
-    dev=$(canonical_dir "$dev") || dev=
-    case "$dev" in
-      *.app/Contents/Developer) printf '%s\n' "${dev%/Contents/Developer}" ;;
+filter_xcode_apps() {
+  while IFS= read -r app; do
+    app=$(canonical_dir "$app") || continue
+    case "$app" in
+      */.Trash/*|*/.Trashes/*) continue ;;
     esac
-  } | while IFS= read -r app; do
-    canonical_dir "$app" || :
+    [ -d "$app/Contents/Developer" ] || continue
+    printf '%s\n' "$app"
   done | sort -u
+}
+
+xcode_apps() {
+  if [ -n "${CONSUELA_FIXTURE_XCODE_APPS-}" ]; then
+    printf '%s\n' "$CONSUELA_FIXTURE_XCODE_APPS" | filter_xcode_apps
+    return 0
+  fi
+  spotlight=$(mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null |
+    filter_xcode_apps)
+  apps=$({
+    printf '%s\n' "$spotlight" /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app
+    printf '%s/../..\n' "$(first_line xcode-select -p)"
+  } | filter_xcode_apps)
+  if [ -z "$spotlight" ] && [ -n "$apps" ]; then
+    warn "Spotlight found no Xcode; checked only /Applications, ~/Applications," \
+      "and the selected Xcode"
+  fi
+  printf '%s\n' "$apps"
+}
+
+simctl_scan_unless_multiple_xcodes() {
+  xcodes=$(xcode_apps)
+  n=$(printf '%s\n' "$xcodes" | grep -c .) || :
+  if [ "$n" -gt 1 ]; then
+    warn "found $n Xcodes; skipping unavailable simulators and runtimes:"
+    printf '%s\n' "$xcodes" | sed 's/^/  /' >&2
+    return 0
+  fi
+  run_simctl_scan
 }
 
 scan_xcode() {
@@ -346,15 +368,7 @@ scan_xcode() {
     XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
     add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
 
-    xcodes=$(xcode_apps)
-    if [ "$(printf '%s\n' "$xcodes" | grep -c .)" -gt 1 ]; then
-      warn "more than one Xcode installed; skipping unavailable simulators" \
-        "and runtimes because another Xcode may still need them:"
-      printf '%s\n' "$xcodes" | sed 's/^/  /' >&2
-      scan_out=
-    else
-      scan_out=$(run_simctl_scan) || scan_out=
-    fi
+    scan_out=$(simctl_scan_unless_multiple_xcodes) || scan_out=
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       case "$line" in
