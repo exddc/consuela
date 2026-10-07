@@ -181,6 +181,7 @@ EOF
 plan_init() {
   PLAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/consuela.XXXXXX")
   PLAN_COUNT=0
+  PLAN_UPPER=0
 }
 
 plan_rec() {
@@ -208,6 +209,14 @@ add() {
   printf '%s' "$arg" >"$rec/arg"
 }
 
+add_upper_bound() {
+  before=$PLAN_COUNT
+  add "$@"
+  [ "$PLAN_COUNT" -gt "$before" ] || return 0
+  printf 'up to %s\n' "$(fmt_kb "$2")" >"$(plan_rec "$PLAN_COUNT")/size"
+  PLAN_UPPER=1
+}
+
 sum_plan_kb() {
   s=0
   i=1
@@ -224,7 +233,13 @@ print_plan() {
   i=1
   while [ "$i" -le "$PLAN_COUNT" ]; do
     rec=$(plan_rec "$i")
-    printf '  %8s  %s\n' "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
+    size=$(sed -n '1p' "$rec/size")
+    label=$(sed -n '1p' "$rec/label")
+    if [ "$PLAN_UPPER" -eq 1 ]; then
+      printf '  %14s  %s\n' "$size" "$label"
+    else
+      printf '  %8s  %s\n' "$size" "$label"
+    fi
     i=$((i + 1))
   done
 }
@@ -392,7 +407,7 @@ scan_cache() {
 
   pnpm_store=$(cache_path_or_default "$HOME/Library/pnpm/store" pnpm store path)
   if have pnpm; then
-    add cache "$(du_kb "$pnpm_store")" \
+    add_upper_bound cache "$(du_kb "$pnpm_store")" \
       "pnpm store prune (unreferenced packages)" pnpm_prune "$pnpm_store"
   fi
 
@@ -436,10 +451,14 @@ scan_docker() {
         gsub(/[0-9.]/, "", u)
         u = toupper(u)
         if (u == "B") return n / 1024
-        if (u == "KB" || u == "KIB" || u == "K") return n
-        if (u == "MB" || u == "MIB" || u == "M") return n * 1024
-        if (u == "GB" || u == "GIB" || u == "G") return n * 1024 * 1024
-        if (u == "TB" || u == "TIB" || u == "T") return n * 1024 * 1024 * 1024
+        if (u == "KB") return n * 1000 / 1024
+        if (u == "MB") return n * 1000 ^ 2 / 1024
+        if (u == "GB") return n * 1000 ^ 3 / 1024
+        if (u == "TB") return n * 1000 ^ 4 / 1024
+        if (u == "KIB") return n
+        if (u == "MIB") return n * 1024
+        if (u == "GIB") return n * 1024 ^ 2
+        if (u == "TIB") return n * 1024 ^ 3
         return 0
       }
       $1 == "Local Volumes" { next }
@@ -448,7 +467,7 @@ scan_docker() {
     '
   )
   if [ "$DOCKER_MODE" = dangling ]; then
-    add docker "$docker_kb" \
+    add_upper_bound docker "$docker_kb" \
       "Docker dangling images, containers, build cache; volumes kept" \
       docker_dangling
   else
@@ -596,8 +615,12 @@ consuela_main() {
 
   run_kb=$(sum_plan_kb)
 
+  run_size=$(fmt_kb "$run_kb")
+  if [ "$PLAN_UPPER" -eq 1 ]; then
+    run_size="up to $run_size"
+  fi
   echo
-  printf 'This run:   %s\n' "$(fmt_kb "$run_kb")"
+  printf 'This run:   %s\n' "$run_size"
 
   if [ "$run_kb" -le 0 ]; then
     echo
