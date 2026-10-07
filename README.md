@@ -82,6 +82,15 @@ Each plan line names the operation that will run.
 - **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay.
 - **Docker**: `docker system prune -af` for `--docker` / `--docker-all`, or `docker system prune -f` for `--docker-dangling`. Neither command removes volumes.
 
+## Tests
+
+From a clone:
+
+```sh
+./tests/run.sh
+```
+
+The suite runs [shellcheck](https://www.shellcheck.net/), checks `fmt_kb` and plan records, refuses `clear_dir` of `$HOME` and `/`, and runs the simulator JSON fixtures.
 
 ## Contributing
 
