@@ -3,6 +3,9 @@
 
 set -eu
 
+NL='
+'
+
 usage() {
   cat <<'EOF'
 usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling]
@@ -19,8 +22,9 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the confirmation prompt; Docker cleanup is skipped
-                      unless Docker uses a local unix:// socket
+  -y, --yes           skip the prompt; still asks while Xcode tools run;
+                      Docker cleanup is skipped unless Docker uses a
+                      local unix:// socket
   --dry-run           print the plan without deleting
 
 Exits 0 after a dry run, when nothing needs cleaning, or when every step
@@ -79,9 +83,15 @@ first_line() {
   "$@" 2>/dev/null | sed -n '1p'
 }
 
+# Fails for paths containing a newline. The x keeps $(...) from stripping one.
 canonical_dir() {
   [ -d "$1" ] || return 1
-  (CDPATH='' cd -P -- "$1" && pwd -P)
+  resolved=$(CDPATH='' cd -P -- "$1" && pwd -P && echo x) || return 1
+  resolved=${resolved%?x}
+  case "$resolved" in
+    *"$NL"*) return 1 ;;
+  esac
+  printf '%s\n' "$resolved"
 }
 
 # If command exists and prints a non-empty first line, use that; else fallback.
@@ -135,53 +145,48 @@ init_safety() {
     echo "cannot resolve HOME: $HOME" >&2
     exit 1
   }
-  ALLOW_PREFIXES="${HOME_REAL}/Library/Caches
-${HOME_REAL}/Library/Developer
-${HOME_REAL}/Library/Logs
-${HOME_REAL}/Library/pnpm
-${HOME_REAL}/.npm
-${HOME_REAL}/.local
-${HOME_REAL}/.cache
-${HOME_REAL}/.bun
-${HOME_REAL}/.yarn
-"
-  if have brew; then
-    bc=$(first_line brew --cache) || bc=
-    if [ -n "$bc" ]; then
-      ALLOW_PREFIXES="${ALLOW_PREFIXES}${bc}
-"
-    fi
-  fi
 }
 
 path_is_allowed_real() {
-  real=$1
-  [ -n "$real" ] || return 1
-  [ "$real" != / ] || return 1
-  [ "$real" != "$HOME_REAL" ] || return 1
-  while IFS= read -r prefix; do
-    [ -n "$prefix" ] || continue
-    case "$real" in
-      "$prefix"|"$prefix"/*) return 0 ;;
-    esac
-  done <<EOF
-$ALLOW_PREFIXES
-EOF
+  h=$HOME_REAL
+  case "$1" in
+    *"$NL"*|*/) return 1 ;;
+    "$h"/Library/Caches/?*|"$h"/.cache/?*|\
+    "$h"/Library/Developer/Xcode/DerivedData|"$h"/Library/Developer/Xcode/DerivedData/*|\
+    "$h"/Library/Developer/CoreSimulator/Caches|"$h"/Library/Developer/CoreSimulator/Caches/*|\
+    "$h"/Library/Developer/XCTestDevices|"$h"/Library/Developer/XCTestDevices/*|\
+    "$h"/Library/Logs/CoreSimulator|"$h"/Library/Logs/CoreSimulator/*|\
+    "$h"/.npm|"$h"/.npm/*|\
+    "$h"/.bun/install/cache|"$h"/.bun/install/cache/*|\
+    "$h"/.yarn/cache|"$h"/.yarn/cache/*) return 0 ;;
+  esac
   return 1
 }
 
 path_is_allowed() {
-  [ -d "$1" ] || return 1
   real=$(canonical_dir "$1") || return 1
   path_is_allowed_real "$real"
 }
 
+# Prints the paths in $1 that are missing or allowed. Warns about the rest.
+allowed_paths() {
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -e "$p" ] && ! path_is_allowed "$p"; then
+      warn "skipping unsafe path: $p"
+    else
+      printf '%s\n' "$p"
+    fi
+  done <<EOF
+$1
+EOF
+}
+
 # Remove directory contents, keep the directory.
-# Refuses /, $HOME, and paths outside the cache allowlist.
+# Refuses paths outside the allowlist.
 clear_dir() {
   [ -d "$1" ] || return 0
-  real=$(canonical_dir "$1") || return 1
-  if ! path_is_allowed_real "$real"; then
+  if ! real=$(canonical_dir "$1") || ! path_is_allowed_real "$real"; then
     echo "refusing to delete unsafe path: $1" >&2
     return 1
   fi
@@ -227,6 +232,12 @@ add() {
   printf '%s' "$arg" >"$rec/arg"
 }
 
+# Usage: add_clear <group> <label> <newline-separated paths>
+add_clear() {
+  paths=$(allowed_paths "$3")
+  add "$1" "$(printf '%s\n' "$paths" | paths_du_kb)" "$2" clear_dir "$paths"
+}
+
 sum_plan_kb() {
   s=0
   i=1
@@ -251,6 +262,28 @@ print_plan() {
 fail() {
   echo "  failed: $STEP" >&2
   FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+plan_has_group() {
+  grep -qxF -- "$1" "$PLAN_DIR"/*/group 2>/dev/null
+}
+
+running_xcode_tools() {
+  if ! have pgrep; then
+    warn "pgrep not found"
+    return 1
+  fi
+  procs=$(pgrep -lx -u "$(id -u)" 'Xcode|Simulator|xcodebuild|launchd_sim') || {
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      return 0
+    fi
+    warn "pgrep exited $rc"
+    return 1
+  }
+  printf '%s\n' "$procs" |
+    awk '{ print ($2 == "launchd_sim" ? "booted simulator" : $2) }' |
+    LC_ALL=C sort -u | paste -sd ',' - | sed 's/,/, /g'
 }
 
 run_ok() {
@@ -344,7 +377,7 @@ PY
 
 scan_xcode() {
   if xcode_ready; then
-    XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
+    XCTEST_DEVICES=$(allowed_paths "$HOME/Library/Developer/XCTestDevices")
     add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
 
     scan_out=$(run_simctl_scan) || scan_out=
@@ -372,22 +405,17 @@ EOF
     warn "Xcode not found; skipping XCTestDevices, unavailable simulators, and unavailable runtimes. Install Xcode to clean them."
   fi
 
-  add xcode "$(du_kb "$HOME/Library/Developer/Xcode/DerivedData")" \
-    "DerivedData" clear_dir "$HOME/Library/Developer/Xcode/DerivedData"
-  add xcode "$(du_kb "$HOME/Library/Developer/CoreSimulator/Caches")" \
-    "CoreSimulator caches" clear_dir "$HOME/Library/Developer/CoreSimulator/Caches"
-  add xcode "$(du_kb "$HOME/Library/Logs/CoreSimulator")" \
-    "Simulator logs" clear_dir "$HOME/Library/Logs/CoreSimulator"
-  add xcode "$(du_kb "$HOME/Library/Caches/com.apple.dt.xcodebuild")" \
-    "xcodebuild cache" clear_dir "$HOME/Library/Caches/com.apple.dt.xcodebuild"
-  add xcode "$(du_kb "$HOME/Library/Caches/org.swift.swiftpm")" \
-    "SwiftPM cache" clear_dir "$HOME/Library/Caches/org.swift.swiftpm"
+  add_clear xcode "DerivedData" "$HOME/Library/Developer/Xcode/DerivedData"
+  add_clear xcode "CoreSimulator caches" "$HOME/Library/Developer/CoreSimulator/Caches"
+  add_clear xcode "Simulator logs" "$HOME/Library/Logs/CoreSimulator"
+  add_clear xcode "xcodebuild cache" "$HOME/Library/Caches/com.apple.dt.xcodebuild"
+  add_clear xcode "SwiftPM cache" "$HOME/Library/Caches/org.swift.swiftpm"
 
   cocoapods="$HOME/Library/Caches/CocoaPods"
   if have pod; then
     add xcode "$(du_kb "$cocoapods")" "CocoaPods cache clean --all" cocoapods "$cocoapods"
   else
-    add xcode "$(du_kb "$cocoapods")" "CocoaPods cache directory" clear_dir "$cocoapods"
+    add_clear xcode "CocoaPods cache directory" "$cocoapods"
   fi
 }
 
@@ -396,15 +424,15 @@ scan_cache() {
   if have npm; then
     add cache "$(du_kb "$npm_cache")" "npm cache clean --force" npm_clean "$npm_cache"
   else
-    add cache "$(du_kb "$npm_cache")" "npm cache directory" clear_dir "$npm_cache"
+    add_clear cache "npm cache directory" "$npm_cache"
   fi
 
   yarn_arg=$(yarn_cache_paths)
-  yarn_kb=$(printf '%s\n' "$yarn_arg" | paths_du_kb)
   if have yarn; then
+    yarn_kb=$(printf '%s\n' "$yarn_arg" | paths_du_kb)
     add cache "$yarn_kb" "Yarn cache clean" yarn_clean "$yarn_arg"
   else
-    add cache "$yarn_kb" "Yarn cache directories" clear_dir "$yarn_arg"
+    add_clear cache "Yarn cache directories" "$yarn_arg"
   fi
 
   pnpm_store=$(cache_path_or_default "$HOME/Library/pnpm/store" pnpm store path)
@@ -414,7 +442,7 @@ scan_cache() {
   fi
 
   bun_cache="$HOME/.bun/install/cache"
-  add cache "$(du_kb "$bun_cache")" "Bun install cache" clear_dir "$bun_cache"
+  add_clear cache "Bun install cache" "$bun_cache"
 
   pip_cache=
   if have_dev_tool python3; then
@@ -424,19 +452,19 @@ scan_cache() {
     add cache "$(du_kb "$pip_cache")" "pip cache purge" pip_purge "$pip_cache"
   else
     pip_cache="$HOME/Library/Caches/pip"
-    add cache "$(du_kb "$pip_cache")" "pip cache directory" clear_dir "$pip_cache"
+    add_clear cache "pip cache directory" "$pip_cache"
   fi
 
   uv_arg=$(uv_cache_paths)
-  uv_kb=$(printf '%s\n' "$uv_arg" | paths_du_kb)
   if have uv; then
+    uv_kb=$(printf '%s\n' "$uv_arg" | paths_du_kb)
     add cache "$uv_kb" "uv cache clean" uv_clean "$uv_arg"
   else
-    add cache "$uv_kb" "uv cache directories" clear_dir "$uv_arg"
+    add_clear cache "uv cache directories" "$uv_arg"
   fi
 
   brew_cache=$(cache_path_or_default "$HOME/Library/Caches/Homebrew" brew --cache)
-  add cache "$(du_kb "$brew_cache")" "Homebrew download cache" clear_dir "$brew_cache"
+  add_clear cache "Homebrew download cache" "$brew_cache"
 }
 
 scan_docker() {
@@ -508,8 +536,8 @@ run_action() {
   case "$action" in
     xctest)
       if [ -d "$arg" ]; then
-        if path_is_allowed "$arg"; then
-          run_ok xcrun simctl --set "$arg" delete all
+        if real=$(canonical_dir "$arg") && path_is_allowed_real "$real"; then
+          run_ok xcrun simctl --set "$real" delete all
         else
           echo "refusing to delete unsafe path: $arg" >&2
           fail
@@ -630,6 +658,9 @@ consuela_main() {
     DO_DOCKER=1
   fi
 
+  # Project config in the caller's directory must not redirect cache commands.
+  cd -- "$HOME_REAL"
+
   plan_init
   trap 'rm -rf "$PLAN_DIR"' EXIT
 
@@ -660,8 +691,22 @@ consuela_main() {
   print_plan
   echo
 
-  if [ "$DO_XCODE" -eq 1 ]; then
-    echo "Do not run this while Xcode tests are executing."
+  need_confirm=$((1 - YES))
+
+  xcode_guard=
+  if plan_has_group xcode; then
+    if ! xcode_tools=$(running_xcode_tools); then
+      xcode_guard="Xcode tool check failed"
+      echo "$xcode_guard. Make sure Xcode, Simulator, booted simulators, and xcodebuild are stopped."
+      need_confirm=1
+    elif [ -n "$xcode_tools" ]; then
+      xcode_guard="Xcode tools running: $xcode_tools"
+      echo "$xcode_guard"
+      echo "Stop them before you continue."
+      need_confirm=1
+    elif [ "$DRY_RUN" -eq 0 ]; then
+      echo "Do not start Xcode builds or tests until cleanup finishes."
+    fi
   fi
 
   if [ -n "$DOCKER_TARGET" ]; then
@@ -673,7 +718,10 @@ consuela_main() {
     exit 0
   fi
 
-  if [ "$YES" -eq 0 ]; then
+  if [ "$need_confirm" -eq 1 ]; then
+    if [ "$YES" -eq 1 ] && [ -n "$xcode_guard" ] && [ ! -t 0 ]; then
+      echo "-y ignored: $xcode_guard" >&2
+    fi
     printf 'Proceed? [y/N] '
     read -r ans || ans=n
     echo

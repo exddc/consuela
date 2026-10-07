@@ -8,8 +8,6 @@ consuela is a macOS cleanup script that removes leftover Xcode data and develope
 
 The script permanently deletes the data it lists. It asks for confirmation unless you pass `-y`. Do not run it if you need to keep any listed data.
 
-Do not run the Xcode group while Xcode is testing or building.
-
 ## What it cleans
 
 **Xcode (`--xcode`)**
@@ -23,6 +21,8 @@ Do not run the Xcode group while Xcode is testing or building.
 Available simulators, source code, and installed runtimes that Xcode still uses stay in place.
 
 Without Xcode, consuela skips XCTestDevices, unavailable simulators, and unavailable runtimes, and cleans the rest of the group.
+
+When the plan includes Xcode data, consuela checks for your Xcode, Simulator, booted simulators, and `xcodebuild`. If any are running, it lists them and asks for confirmation even when you passed `-y`. It also asks when the check fails. So `-y` does not make an Xcode cleanup unattended while these tools run. Do not start Xcode builds or tests until cleanup finishes.
 
 **Caches (`--cache`)**
 
@@ -57,7 +57,7 @@ Run the full cleanup:
 consuela
 ```
 
-`-y` skips the confirmation prompt. `--dry-run` prints the plan and exits without deleting.
+`-y` skips the confirmation prompt, except in the Xcode and Docker cases described above. `--dry-run` prints the plan and exits without deleting.
 
 ```sh
 consuela --xcode
@@ -78,12 +78,17 @@ Disk Utility may still report the old free space until Time Machine local snapsh
 
 Each plan line names the operation that will run.
 
-- **Wipe directory contents** (`clear_dir`): delete everything inside a cache directory, keep the directory. Used for DerivedData, CoreSimulator caches, simulator logs, xcodebuild, SwiftPM, Bun's install cache, Homebrew's download cache, and for npm/Yarn/pip/uv/CocoaPods when that tool is not on PATH. The path must resolve under an allowlist (`~/Library/Caches`, `~/Library/Developer`, `~/Library/Logs`, `~/Library/pnpm`, `~/.npm`, `~/.local`, `~/.cache`, `~/.bun`, `~/.yarn`, or `brew --cache`). `/` and `$HOME` are refused.
+- **Wipe directory contents** (`clear_dir`): delete everything inside a cache directory, keep the directory. Used for DerivedData, CoreSimulator caches, simulator logs, xcodebuild, SwiftPM, Bun's install cache, Homebrew's download cache, and for npm/Yarn/pip/uv/CocoaPods when the tool is not on PATH.
+- **Allowlist**: consuela resolves symlinks before it wipes a directory or deletes XCTestDevices. The resolved path must match one of these entries:
+  - Inside only: `~/Library/Caches`, `~/.cache`
+  - The directory itself or inside: `~/Library/Developer/Xcode/DerivedData`, `~/Library/Developer/CoreSimulator/Caches`, `~/Library/Developer/XCTestDevices`, `~/Library/Logs/CoreSimulator`, `~/.npm`, `~/.bun/install/cache`, `~/.yarn/cache`
+  - Any other path is skipped with a warning during the scan. `/` and `$HOME` are never allowed.
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).
 - **pnpm**: `pnpm store prune` only. That removes packages no project references. It does not delete the store directory. If pnpm is not installed, consuela leaves the store alone.
-- **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay.
+- **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay. A custom `brew --cache` outside the allowlist is skipped.
 - **Docker**: `docker system prune -af` for `--docker` / `--docker-all`, or `docker system prune -f` for `--docker-dangling`. Neither command removes volumes.
 
+npm, Yarn, pnpm, pip, and uv commands run from your home directory. Config files in the current directory, such as `.npmrc` or `.yarnrc.yml`, do not change what gets cleaned. Config in your home directory and environment variables such as `UV_CACHE_DIR` still apply. These commands use your global tool versions.
 
 ## Contributing
 
