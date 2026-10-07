@@ -20,10 +20,13 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
   -y, --yes           skip the confirmation prompt (not when DOCKER_HOST is set)
-  --dry-run           print the plan and exit 0 without deleting
+  --dry-run           print the plan without deleting
 
-Exit status is 0 when every step succeeds or there is nothing to clean,
-and 1 when a step fails, the prompt is declined, or consuela cannot run.
+Exits 0 after a dry run, when nothing needs cleaning, or when every step
+succeeds. Exits 1 for a usage error, a declined prompt, a failed step, or
+when consuela cannot start. Failed steps are listed on stderr. Anything
+that cannot be scanned, such as Docker with the daemon stopped, prints a
+warning and is skipped without changing the exit status.
 EOF
 }
 
@@ -184,7 +187,6 @@ EOF
 plan_init() {
   PLAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/consuela.XXXXXX")
   PLAN_COUNT=0
-  FAIL_COUNT=0
 }
 
 plan_rec() {
@@ -233,13 +235,13 @@ print_plan() {
   done
 }
 
-run_ok() {
-  if "$@"; then
-    return 0
-  fi
-  echo "  failed (continuing)" >&2
+fail() {
+  echo "  failed: $STEP" >&2
   FAIL_COUNT=$((FAIL_COUNT + 1))
-  return 0
+}
+
+run_ok() {
+  "$@" || fail
 }
 
 # Prints "unavailable_devices <kb>" and "unavailable_runtime <kb> <id>" lines.
@@ -473,7 +475,7 @@ run_action() {
           run_ok xcrun simctl --set "$arg" delete all
         else
           echo "refusing to delete unsafe path: $arg" >&2
-          FAIL_COUNT=$((FAIL_COUNT + 1))
+          fail
         fi
       fi
       ;;
@@ -509,12 +511,10 @@ run_action() {
       run_ok pnpm store prune
       ;;
     pip_purge)
-      if python3 -m pip cache purge; then
-        :
-      else
-        echo "  pip cache purge failed, deleting $arg" >&2
+      python3 -m pip cache purge || {
+        warn "pip cache purge failed; clearing $arg"
         run_ok clear_dir "$arg"
-      fi
+      }
       ;;
     uv_clean)
       run_ok uv cache clean
@@ -527,20 +527,26 @@ run_action() {
       ;;
     *)
       warn "unknown action $action"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
+      fail
       ;;
   esac
 }
 
 run_plan() {
+  FAILED_STEPS=
   i=1
   while [ "$i" -le "$PLAN_COUNT" ]; do
     rec=$(plan_rec "$i")
-    label=$(sed -n '1p' "$rec/label")
+    STEP=$(sed -n '1p' "$rec/label")
     action=$(sed -n '1p' "$rec/action")
     arg=$(cat "$rec/arg")
-    echo "Cleaning $label..."
+    echo "Cleaning $STEP..."
+    before=$FAIL_COUNT
     run_action "$action" "$arg"
+    if [ "$FAIL_COUNT" -ne "$before" ]; then
+      FAILED_STEPS="$FAILED_STEPS  $STEP
+"
+    fi
     i=$((i + 1))
   done
 }
@@ -645,7 +651,7 @@ consuela_main() {
     case "$ans" in
       y|Y|yes|YES) ;;
       *)
-        echo "Aborted."
+        echo "Aborted." >&2
         exit 1
         ;;
     esac
@@ -653,13 +659,17 @@ consuela_main() {
 
   echo
   run_plan
-  if [ "$FAIL_COUNT" -gt 0 ]; then
-    echo "Done with $FAIL_COUNT failed step(s)." >&2
+  if [ -n "$FAILED_STEPS" ]; then
+    n=$(printf '%s' "$FAILED_STEPS" | awk 'END { print NR }')
+    echo "Done with $n failed step(s):" >&2
+    printf '%s' "$FAILED_STEPS" >&2
     exit 1
   fi
   echo "Done."
 }
 
+FAIL_COUNT=0
+STEP=
 init_safety
 
 # Sourced by tests: return. Executed: run main. SC2317 is a false positive.

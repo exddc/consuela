@@ -68,7 +68,7 @@ consuela --dry-run --cache
 
 With group flags, consuela scans only those groups.
 
-If a step fails, consuela prints the failure to stderr, runs the remaining steps, and exits 1. Declining the prompt also exits 1. A dry run, a run with nothing to clean, and a run where every step succeeds exit 0.
+consuela exits 0 after a dry run, when nothing needs cleaning, or when every step succeeds. It exits 1 for a usage error, a declined prompt, a failed step, or when it cannot start, for example outside macOS. When a step fails, consuela runs the remaining steps and lists the failed ones on stderr. If consuela cannot scan something, such as Docker with the daemon stopped, it prints a warning and skips it. The exit status does not change.
 
 Disk Utility may still report the old free space until Time Machine local snapshots expire. The delay is not a failed cleanup.
 
