@@ -37,7 +37,7 @@ Package-manager caches only. See Cleanup policy for the exact command on each pl
 
 Reclaimable size for Docker comes from `docker system df`. `prune -a` can free more than that figure because unused tagged images are included in the delete but not always in the df reclaimable column.
 
-If `DOCKER_HOST` is set, consuela prints it and asks for confirmation even when you passed `-y`.
+consuela checks which Docker endpoint the cleanup will use. It follows `DOCKER_HOST`, `DOCKER_CONTEXT`, and `docker context use`. If the endpoint is not a local `unix://` socket, or consuela cannot read it, consuela prints it and asks for confirmation even when you passed `-y`.
 
 ## Install
 

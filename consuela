@@ -19,7 +19,8 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the confirmation prompt (not when DOCKER_HOST is set)
+  -y, --yes           skip the confirmation prompt; still asks when Docker
+                      does not use a local unix:// socket
   --dry-run           print the plan and exit 0 without deleting
 EOF
 }
@@ -227,6 +228,22 @@ print_plan() {
     printf '  %8s  %s\n' "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
     i=$((i + 1))
   done
+}
+
+plan_has_group() {
+  i=1
+  while [ "$i" -le "$PLAN_COUNT" ]; do
+    rec=$(plan_rec "$i")
+    [ "$(sed -n '1p' "$rec/group")" = "$1" ] && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# With no name, context inspect resolves DOCKER_HOST, DOCKER_CONTEXT, and the current context.
+docker_endpoint() {
+  out=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null) || return 1
+  printf '%s\n' "$out" | sed -n '1p'
 }
 
 run_ok() {
@@ -613,9 +630,17 @@ consuela_main() {
     echo "Do not run this while Xcode tests are executing."
   fi
 
-  if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
-    echo "DOCKER_HOST=$DOCKER_HOST"
-    echo "Cleanup targets that Docker daemon, which may be remote."
+  docker_confirm=0
+  if plan_has_group docker; then
+    endpoint=$(docker_endpoint) || endpoint=
+    case "$endpoint" in
+      unix://*) ;;
+      *)
+        docker_confirm=1
+        echo "Docker endpoint: ${endpoint:-unknown}"
+        echo "Docker cleanup may target a remote daemon."
+        ;;
+    esac
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -627,7 +652,7 @@ consuela_main() {
   if [ "$YES" -eq 0 ]; then
     need_confirm=1
   fi
-  if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
+  if [ "$docker_confirm" -eq 1 ]; then
     need_confirm=1
   fi
 
