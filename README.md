@@ -72,7 +72,7 @@ Disk Utility may still report the old free space until Time Machine local snapsh
 
 ## Cleanup policy
 
-Each plan line names the operation that will run.
+Each plan line names the operation that will run. Tool commands run from your home directory, so project config such as `.npmrc` or `.yarnrc.yml` in the current directory does not change what gets cleaned.
 
 - **Wipe directory contents** (`clear_dir`): delete everything inside a cache directory, keep the directory. Used for DerivedData, CoreSimulator caches, simulator logs, xcodebuild, SwiftPM, Bun's install cache, Homebrew's download cache, and for npm/Yarn/pip/uv/CocoaPods when that tool is not on PATH. The path must resolve under an allowlist (`~/Library/Caches`, `~/Library/Developer`, `~/Library/Logs`, `~/Library/pnpm`, `~/.npm`, `~/.local`, `~/.cache`, `~/.bun`, `~/.yarn`, or `brew --cache`). `/` and `$HOME` are refused.
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).

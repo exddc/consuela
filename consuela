@@ -579,6 +579,11 @@ consuela_main() {
     DO_DOCKER=1
   fi
 
+  cd -- "$HOME_REAL" || {
+    echo "cannot change to HOME: $HOME_REAL" >&2
+    exit 1
+  }
+
   plan_init
   trap 'rm -rf "$PLAN_DIR"' EXIT
 
