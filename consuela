@@ -21,6 +21,9 @@ With no group flags, scans and cleans every group after confirmation.
                       volumes kept
   -y, --yes           skip the confirmation prompt (not when DOCKER_HOST is set)
   --dry-run           print the plan and exit 0 without deleting
+
+Exit status is 0 when every step succeeds or there is nothing to clean,
+and 1 when a step fails, the prompt is declined, or consuela cannot run.
 EOF
 }
 
@@ -181,6 +184,7 @@ EOF
 plan_init() {
   PLAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/consuela.XXXXXX")
   PLAN_COUNT=0
+  FAIL_COUNT=0
 }
 
 plan_rec() {
@@ -233,7 +237,8 @@ run_ok() {
   if "$@"; then
     return 0
   fi
-  echo "  failed (continuing)"
+  echo "  failed (continuing)" >&2
+  FAIL_COUNT=$((FAIL_COUNT + 1))
   return 0
 }
 
@@ -468,6 +473,7 @@ run_action() {
           run_ok xcrun simctl --set "$arg" delete all
         else
           echo "refusing to delete unsafe path: $arg" >&2
+          FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
       fi
       ;;
@@ -506,7 +512,7 @@ run_action() {
       if python3 -m pip cache purge; then
         :
       else
-        echo "  pip cache purge failed, deleting $arg"
+        echo "  pip cache purge failed, deleting $arg" >&2
         run_ok clear_dir "$arg"
       fi
       ;;
@@ -521,6 +527,7 @@ run_action() {
       ;;
     *)
       warn "unknown action $action"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
       ;;
   esac
 }
@@ -639,13 +646,17 @@ consuela_main() {
       y|Y|yes|YES) ;;
       *)
         echo "Aborted."
-        exit 0
+        exit 1
         ;;
     esac
   fi
 
   echo
   run_plan
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "Done with $FAIL_COUNT failed step(s)." >&2
+    exit 1
+  fi
   echo "Done."
 }
 

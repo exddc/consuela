@@ -68,6 +68,8 @@ consuela --dry-run --cache
 
 With group flags, consuela scans only those groups.
 
+If a step fails, consuela prints the failure to stderr, runs the remaining steps, and exits 1. Declining the prompt also exits 1. A dry run, a run with nothing to clean, and a run where every step succeeds exit 0.
+
 Disk Utility may still report the old free space until Time Machine local snapshots expire. The delay is not a failed cleanup.
 
 ## Cleanup policy
