@@ -15,12 +15,14 @@ Do not run the Xcode group while Xcode is testing or building.
 **Xcode (`--xcode`)**
 
 - Throwaway test clones in `~/Library/Developer/XCTestDevices`
-- Simulator devices whose runtime is gone (`xcrun simctl delete unavailable`)
-- Unavailable simulator runtimes (`xcrun simctl runtime delete`)
+- Simulator devices whose runtime is gone (`xcrun simctl delete unavailable`), only when one Xcode is installed
+- Unavailable simulator runtimes (`xcrun simctl runtime delete`), only when one Xcode is installed
 - Contents of DerivedData, CoreSimulator caches, simulator logs, xcodebuild cache
 - SwiftPM cache and CocoaPods cache
 
-Available simulators, source code, and installed runtimes that Xcode still uses stay in place.
+Available simulators, source code, and installed runtimes that any Xcode consuela finds still uses stay in place.
+
+`simctl` decides what is unavailable for the selected Xcode only. Another Xcode, such as Xcode-beta, may still need those simulators and runtimes. When consuela finds more than one Xcode, it keeps them, lists the installs it found, and still cleans the other Xcode items. It looks for Xcode with Spotlight, in `/Applications` and `~/Applications`, and at the `xcode-select` path.
 
 **Caches (`--cache`)**
 

@@ -10,7 +10,8 @@ usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling
 
 With no group flags, scans and cleans every group after confirmation.
 
-  --xcode             XCTestDevices, unavailable simulators and runtimes,
+  --xcode             XCTestDevices, unavailable simulators and runtimes
+                      (skipped when more than one Xcode is installed),
                       DerivedData, CoreSimulator caches, simulator logs,
                       xcodebuild cache, SwiftPM cache, CocoaPods cache
   --cache             npm, Yarn, pnpm, Bun, pip, uv, Homebrew download cache
@@ -322,12 +323,38 @@ except Exception as e:
 PY
 }
 
+xcode_apps() {
+  {
+    if have mdfind; then
+      mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null || :
+    fi
+    for app in /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app; do
+      printf '%s\n' "$app"
+    done
+    dev=$(first_line xcode-select -p) || dev=
+    dev=$(canonical_dir "$dev") || dev=
+    case "$dev" in
+      *.app/Contents/Developer) printf '%s\n' "${dev%/Contents/Developer}" ;;
+    esac
+  } | while IFS= read -r app; do
+    canonical_dir "$app" || :
+  done | sort -u
+}
+
 scan_xcode() {
   if have xcrun; then
     XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
     add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
 
-    scan_out=$(run_simctl_scan) || scan_out=
+    xcodes=$(xcode_apps)
+    if [ "$(printf '%s\n' "$xcodes" | grep -c .)" -gt 1 ]; then
+      warn "more than one Xcode installed; skipping unavailable simulators" \
+        "and runtimes because another Xcode may still need them:"
+      printf '%s\n' "$xcodes" | sed 's/^/  /' >&2
+      scan_out=
+    else
+      scan_out=$(run_simctl_scan) || scan_out=
+    fi
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       case "$line" in
