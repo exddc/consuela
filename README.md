@@ -22,6 +22,8 @@ Do not run the Xcode group while Xcode is testing or building.
 
 Available simulators, source code, and installed runtimes that Xcode still uses stay in place.
 
+Without Xcode, consuela skips XCTestDevices, unavailable simulators, and unavailable runtimes, and cleans the rest of the group.
+
 **Caches (`--cache`)**
 
 Package-manager caches only. See Cleanup policy for the exact command on each plan line.
@@ -37,7 +39,7 @@ Package-manager caches only. See Cleanup policy for the exact command on each pl
 
 Reclaimable size for Docker comes from `docker system df`. `prune -a` can free more than that figure because unused tagged images are included in the delete but not always in the df reclaimable column.
 
-If `DOCKER_HOST` is set, consuela prints it and asks for confirmation even when you passed `-y`.
+consuela resolves the Docker context once, the same way the `docker` command does. The lookup follows `DOCKER_HOST`, `DOCKER_CONTEXT`, and `docker context use`. The scan and the prune both use that context, and the plan shows its endpoint. Any `unix://` socket counts as local. With `-y`, consuela skips Docker cleanup when the endpoint is not a `unix://` socket or cannot be read. Run consuela without `-y` to confirm a remote cleanup at the prompt.
 
 ## Install
 
