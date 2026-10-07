@@ -116,23 +116,15 @@ init_safety() {
     echo "cannot resolve HOME: $HOME" >&2
     exit 1
   }
-  ALLOW_PREFIXES="${HOME_REAL}/Library/Caches
+  ALLOW_ROOTS="${HOME_REAL}/Library/Caches
 ${HOME_REAL}/Library/Developer
 ${HOME_REAL}/Library/Logs
-${HOME_REAL}/Library/pnpm
-${HOME_REAL}/.npm
-${HOME_REAL}/.local
 ${HOME_REAL}/.cache
-${HOME_REAL}/.bun
-${HOME_REAL}/.yarn
 "
-  if have brew; then
-    bc=$(first_line brew --cache) || bc=
-    if [ -n "$bc" ]; then
-      ALLOW_PREFIXES="${ALLOW_PREFIXES}${bc}
+  ALLOW_DIRS="${HOME_REAL}/.npm
+${HOME_REAL}/.bun/install/cache
+${HOME_REAL}/.yarn/cache
 "
-    fi
-  fi
 }
 
 path_is_allowed_real() {
@@ -140,13 +132,21 @@ path_is_allowed_real() {
   [ -n "$real" ] || return 1
   [ "$real" != / ] || return 1
   [ "$real" != "$HOME_REAL" ] || return 1
-  while IFS= read -r prefix; do
-    [ -n "$prefix" ] || continue
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
     case "$real" in
-      "$prefix"|"$prefix"/*) return 0 ;;
+      "$root"/*) return 0 ;;
     esac
   done <<EOF
-$ALLOW_PREFIXES
+$ALLOW_ROOTS
+EOF
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    case "$real" in
+      "$dir"|"$dir"/*) return 0 ;;
+    esac
+  done <<EOF
+$ALLOW_DIRS
 EOF
   return 1
 }
