@@ -10,6 +10,7 @@ usage() {
   cat <<'EOF'
 usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling]
                 [-y] [--dry-run]
+       consuela --update
 
 With no group flags, scans and cleans every group after confirmation.
 
@@ -27,13 +28,38 @@ With no group flags, scans and cleans every group after confirmation.
                       Docker cleanup is skipped unless Docker uses a
                       local unix:// socket
   --dry-run           print the plan without deleting
+  --update            replace this consuela file with the latest version
+                      from GitHub; must be the only argument
 
-Exits 0 after a dry run, when nothing needs cleaning, or when every step
-succeeds. Exits 1 for a usage error, a declined prompt, a failed step, or
-when consuela cannot start. Failed steps are listed on stderr. Anything
-that cannot be scanned, such as Docker with the daemon stopped, prints a
-warning and is skipped without changing the exit status.
+Exits 0 after a dry run, when nothing needs cleaning, when every step
+succeeds, or after an update. Exits 1 for a usage error, a declined
+prompt, a failed step, a failed update, or when consuela cannot start.
+Failed steps are listed on stderr. Anything that cannot be scanned, such
+as Docker with the daemon stopped, prints a warning and is skipped
+without changing the exit status.
 EOF
+}
+
+INSTALLER_URL="https://raw.githubusercontent.com/exddc/consuela/main/install.sh"
+
+# Installs the latest consuela into the directory of $1.
+self_update() {
+  case "$1" in
+    */consuela) ;;
+    *)
+      echo "error: run consuela by its path, for example ~/.local/bin/consuela --update" >&2
+      return 1
+      ;;
+  esac
+  if [ -L "$1" ] || [ ! -f "$1" ]; then
+    echo "error: $1 is not a regular file" >&2
+    return 1
+  fi
+  dir=$(canonical_dir "${1%/*}/") || return 1
+  installer=$(mktemp "${TMPDIR:-/tmp}/consuela-install.XXXXXX") || return 1
+  trap 'rm -f "$installer"' EXIT
+  curl -fsSL --connect-timeout 10 --max-time 120 "$INSTALLER_URL" -o "$installer" &&
+    CONSUELA_BIN=$dir sh "$installer"
 }
 
 have() {
@@ -690,6 +716,15 @@ consuela_main() {
   if [ "$(uname -s)" != "Darwin" ]; then
     echo "consuela only runs on macOS." >&2
     exit 1
+  fi
+
+  if [ "${1:-}" = --update ]; then
+    if [ $# -ne 1 ]; then
+      usage >&2
+      exit 1
+    fi
+    self_update "$0" || exit 1
+    exit 0
   fi
 
   DO_XCODE=0

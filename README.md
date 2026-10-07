@@ -55,6 +55,26 @@ Run the installer:
 curl -fsSL https://raw.githubusercontent.com/exddc/consuela/main/install.sh | sh
 ```
 
+## Update
+
+Replace your installed consuela with the latest version from GitHub:
+
+```sh
+consuela --update
+```
+
+`--update` downloads the latest `install.sh` from `main` and runs it with `CONSUELA_BIN` set to the directory of the consuela file you ran. It must be the only argument. If the file has not changed, the installer leaves it alone and says so.
+
+`CONSUELA_URL` and `CONSUELA_SHA256` apply to the consuela download, as with the installer. Nothing checks the installer itself, so you trust it the same way as with `curl | sh`.
+
+consuela refuses to update a symlink or a copy named anything other than `consuela`. If a symlink points into a git clone, run `git pull` in the clone.
+
+Installations from before `--update` existed do not know the flag. Update them once by running the install command again. For a custom install directory, pass the same `CONSUELA_BIN`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/exddc/consuela/main/install.sh | CONSUELA_BIN=/path/to/bin sh
+```
+
 ## Usage
 
 Run the full cleanup:
