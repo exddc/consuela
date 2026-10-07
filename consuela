@@ -19,7 +19,9 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the confirmation prompt (not when DOCKER_HOST is set)
+  -y, --yes           skip the confirmation prompt; still asks when
+                      DOCKER_HOST is set or Xcode, Simulator, or
+                      xcodebuild is running
   --dry-run           print the plan and exit 0 without deleting
 EOF
 }
@@ -227,6 +229,30 @@ print_plan() {
     printf '  %8s  %s\n' "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
     i=$((i + 1))
   done
+}
+
+plan_has_group() {
+  i=1
+  while [ "$i" -le "$PLAN_COUNT" ]; do
+    rec=$(plan_rec "$i")
+    [ "$(sed -n '1p' "$rec/group")" != "$1" ] || return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+running_xcode_procs() {
+  if ! have pgrep; then
+    warn "pgrep not found; cannot detect running Xcode"
+    return 0
+  fi
+  found=
+  for name in Xcode Simulator xcodebuild; do
+    if pgrep -x "$name" >/dev/null 2>&1; then
+      found="${found:+$found, }$name"
+    fi
+  done
+  printf '%s' "$found"
 }
 
 run_ok() {
@@ -609,8 +635,15 @@ consuela_main() {
   print_plan
   echo
 
-  if [ "$DO_XCODE" -eq 1 ]; then
-    echo "Do not run this while Xcode tests are executing."
+  xcode_running=
+  if plan_has_group xcode; then
+    xcode_running=$(running_xcode_procs)
+    if [ -n "$xcode_running" ]; then
+      echo "Running: $xcode_running"
+      echo "Quit them first, or Xcode builds, tests, and indexes may break."
+    else
+      echo "Do not start Xcode builds or tests until cleanup finishes."
+    fi
   fi
 
   if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
@@ -628,6 +661,9 @@ consuela_main() {
     need_confirm=1
   fi
   if [ "$DO_DOCKER" -eq 1 ] && [ -n "${DOCKER_HOST:-}" ]; then
+    need_confirm=1
+  fi
+  if [ -n "$xcode_running" ]; then
     need_confirm=1
   fi
 
