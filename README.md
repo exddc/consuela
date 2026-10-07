@@ -22,7 +22,7 @@ Do not run the Xcode group while Xcode is testing or building.
 
 Available simulators, source code, and installed runtimes that Xcode still uses stay in place.
 
-The first three items need Xcode or the Command Line Tools. Without them, `consuela --xcode` exits with an error. A run that includes other groups skips those three items.
+Without Xcode, consuela skips XCTestDevices, unavailable simulators, and unavailable runtimes, and cleans the rest of the group.
 
 **Caches (`--cache`)**
 

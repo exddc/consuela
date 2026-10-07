@@ -32,13 +32,16 @@ warn() {
   echo "warning: $*" >&2
 }
 
-# /usr/bin/xcrun and /usr/bin/python3 are stubs that open an install dialog
-# when neither Xcode nor the Command Line Tools are installed.
+# Tools in /usr/bin such as xcrun and python3 are stubs that open an install
+# dialog when xcode-select has no developer directory.
 have_dev_tool() {
   tool=$(command -v "$1" 2>/dev/null) || return 1
-  case "$tool" in
-    /usr/bin/"$1") xcode-select -p >/dev/null 2>&1 ;;
-  esac
+  [ "$(canonical_dir "${tool%/*}")" = /usr/bin ] || return 0
+  xcode-select -p >/dev/null 2>&1
+}
+
+xcode_ready() {
+  have_dev_tool xcrun && xcrun --find simctl >/dev/null 2>&1
 }
 
 # Kilobytes occupied by a path. Missing paths are 0.
@@ -250,7 +253,7 @@ run_ok() {
 # Failures warn on stderr and omit that line; they are not treated as 0 KB success.
 run_simctl_scan() {
   if ! have_dev_tool python3; then
-    warn "python3 not found; skipping unavailable simulator scan"
+    warn "python3 not available; skipping unavailable simulator scan"
     return 0
   fi
   python3 - <<'PY'
@@ -332,7 +335,7 @@ PY
 }
 
 scan_xcode() {
-  if have_dev_tool xcrun; then
+  if xcode_ready; then
     XCTEST_DEVICES="$HOME/Library/Developer/XCTestDevices"
     add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
 
@@ -357,11 +360,8 @@ scan_xcode() {
     done <<EOF
 $scan_out
 EOF
-  elif [ "$DO_CACHE" -eq 0 ] && [ "$DO_DOCKER" -eq 0 ]; then
-    echo "Neither Xcode nor Command Line Tools is installed. Install one of them." >&2
-    exit 1
   else
-    warn "neither Xcode nor Command Line Tools is installed; skipping simulator cleanup"
+    warn "Xcode not found; skipping XCTestDevices, unavailable simulators, and unavailable runtimes. Install Xcode to clean them."
   fi
 
   add xcode "$(du_kb "$HOME/Library/Developer/Xcode/DerivedData")" \
@@ -410,7 +410,7 @@ scan_cache() {
 
   pip_cache=
   if have_dev_tool python3; then
-    pip_cache=$(first_line python3 -m pip cache dir) || pip_cache=
+    pip_cache=$(first_line python3 -m pip cache dir)
   fi
   if [ -n "$pip_cache" ]; then
     add cache "$(du_kb "$pip_cache")" "pip cache purge" pip_purge "$pip_cache"
