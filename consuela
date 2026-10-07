@@ -718,15 +718,8 @@ consuela_main() {
     exit 1
   fi
 
-  if [ "${1:-}" = --update ]; then
-    if [ $# -ne 1 ]; then
-      usage >&2
-      exit 1
-    fi
-    self_update "$0" || exit 1
-    exit 0
-  fi
-
+  ARGC=$#
+  UPDATE=0
   DO_XCODE=0
   DO_CACHE=0
   DO_DOCKER=0
@@ -744,6 +737,7 @@ consuela_main() {
       --docker-dangling) DO_DOCKER=1; ANY_GROUP=1; DOCKER_MODE=dangling ;;
       -y|--yes) YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
+      --update) UPDATE=1 ;;
       -h|--help)
         usage
         exit 0
@@ -756,6 +750,16 @@ consuela_main() {
     esac
     shift
   done
+
+  if [ "$UPDATE" -eq 1 ]; then
+    if [ "$ARGC" -ne 1 ]; then
+      echo "error: --update must be the only argument" >&2
+      usage >&2
+      exit 1
+    fi
+    self_update "$0" || exit 1
+    exit 0
+  fi
 
   if [ "$ANY_GROUP" -eq 0 ]; then
     DO_XCODE=1
