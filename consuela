@@ -181,7 +181,6 @@ EOF
 plan_init() {
   PLAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/consuela.XXXXXX")
   PLAN_COUNT=0
-  PLAN_UPPER=0
 }
 
 plan_rec() {
@@ -194,6 +193,7 @@ add() {
   label=$3
   action=$4
   arg=${5-}
+  kind=${6:-firm}
   case "$kb" in
     ''|*[!0-9]*) kb=0 ;;
   esac
@@ -207,14 +207,11 @@ add() {
   printf '%s\n' "$label" >"$rec/label"
   printf '%s\n' "$action" >"$rec/action"
   printf '%s' "$arg" >"$rec/arg"
+  printf '%s\n' "$kind" >"$rec/kind"
 }
 
-add_upper_bound() {
-  before=$PLAN_COUNT
-  add "$@"
-  [ "$PLAN_COUNT" -gt "$before" ] || return 0
-  printf 'up to %s\n' "$(fmt_kb "$2")" >"$(plan_rec "$PLAN_COUNT")/size"
-  PLAN_UPPER=1
+add_estimate() {
+  add "$1" "$2" "$3" "$4" "${5-}" estimate
 }
 
 sum_plan_kb() {
@@ -222,24 +219,38 @@ sum_plan_kb() {
   i=1
   while [ "$i" -le "$PLAN_COUNT" ]; do
     rec=$(plan_rec "$i")
-    kb=$(sed -n '1p' "$rec/kb")
-    s=$((s + kb))
+    if [ -z "${1-}" ] || [ "$(sed -n '1p' "$rec/kind")" = "$1" ]; then
+      kb=$(sed -n '1p' "$rec/kb")
+      s=$((s + kb))
+    fi
     i=$((i + 1))
   done
   printf '%s\n' "$s"
 }
 
+fmt_run_total() {
+  if [ "$2" -le 0 ]; then
+    fmt_kb "$1"
+  elif [ "$1" -le 0 ]; then
+    printf '~%s estimated' "$(fmt_kb "$2")"
+  else
+    printf '%s, plus ~%s estimated' "$(fmt_kb "$1")" "$(fmt_kb "$2")"
+  fi
+}
+
 print_plan() {
+  pad=
+  if [ "$(sum_plan_kb estimate)" -gt 0 ]; then
+    pad=' '
+  fi
   i=1
   while [ "$i" -le "$PLAN_COUNT" ]; do
     rec=$(plan_rec "$i")
-    size=$(sed -n '1p' "$rec/size")
-    label=$(sed -n '1p' "$rec/label")
-    if [ "$PLAN_UPPER" -eq 1 ]; then
-      printf '  %14s  %s\n' "$size" "$label"
-    else
-      printf '  %8s  %s\n' "$size" "$label"
+    mark=$pad
+    if [ "$(sed -n '1p' "$rec/kind")" = estimate ]; then
+      mark='~'
     fi
+    printf '  %s%8s  %s\n' "$mark" "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
     i=$((i + 1))
   done
 }
@@ -407,7 +418,7 @@ scan_cache() {
 
   pnpm_store=$(cache_path_or_default "$HOME/Library/pnpm/store" pnpm store path)
   if have pnpm; then
-    add_upper_bound cache "$(du_kb "$pnpm_store")" \
+    add_estimate cache "$(du_kb "$pnpm_store")" \
       "pnpm store prune (unreferenced packages)" pnpm_prune "$pnpm_store"
   fi
 
@@ -455,10 +466,6 @@ scan_docker() {
         if (u == "MB") return n * 1000 ^ 2 / 1024
         if (u == "GB") return n * 1000 ^ 3 / 1024
         if (u == "TB") return n * 1000 ^ 4 / 1024
-        if (u == "KIB") return n
-        if (u == "MIB") return n * 1024
-        if (u == "GIB") return n * 1024 ^ 2
-        if (u == "TIB") return n * 1024 ^ 3
         return 0
       }
       $1 == "Local Volumes" { next }
@@ -467,11 +474,11 @@ scan_docker() {
     '
   )
   if [ "$DOCKER_MODE" = dangling ]; then
-    add_upper_bound docker "$docker_kb" \
+    add_estimate docker "$docker_kb" \
       "Docker dangling images, containers, build cache; volumes kept" \
       docker_dangling
   else
-    add docker "$docker_kb" \
+    add_estimate docker "$docker_kb" \
       "Docker unused images (including tagged), containers, build cache; volumes kept" \
       docker_all
   fi
@@ -613,14 +620,12 @@ consuela_main() {
     scan_docker
   fi
 
-  run_kb=$(sum_plan_kb)
+  firm_kb=$(sum_plan_kb firm)
+  estimate_kb=$(sum_plan_kb estimate)
+  run_kb=$((firm_kb + estimate_kb))
 
-  run_size=$(fmt_kb "$run_kb")
-  if [ "$PLAN_UPPER" -eq 1 ]; then
-    run_size="up to $run_size"
-  fi
   echo
-  printf 'This run:   %s\n' "$run_size"
+  printf 'This run:   %s\n' "$(fmt_run_total "$firm_kb" "$estimate_kb")"
 
   if [ "$run_kb" -le 0 ]; then
     echo
