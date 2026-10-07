@@ -22,8 +22,9 @@ With no group flags, scans and cleans every group after confirmation.
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
-  -y, --yes           skip the confirmation prompt; Docker cleanup is skipped
-                      unless Docker uses a local unix:// socket
+  -y, --yes           skip the prompt; still asks while Xcode tools run;
+                      Docker cleanup is skipped unless Docker uses a
+                      local unix:// socket
   --dry-run           print the plan and exit 0 without deleting
 EOF
 }
@@ -250,6 +251,28 @@ print_plan() {
     printf '  %8s  %s\n' "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
     i=$((i + 1))
   done
+}
+
+plan_has_group() {
+  grep -qxF -- "$1" "$PLAN_DIR"/*/group 2>/dev/null
+}
+
+running_xcode_tools() {
+  if ! have pgrep; then
+    warn "pgrep not found"
+    return 1
+  fi
+  procs=$(pgrep -lx -u "$(id -u)" 'Xcode|Simulator|xcodebuild|launchd_sim') || {
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      return 0
+    fi
+    warn "pgrep exited $rc"
+    return 1
+  }
+  printf '%s\n' "$procs" |
+    awk '{ print ($2 == "launchd_sim" ? "booted simulator" : $2) }' |
+    LC_ALL=C sort -u | paste -sd ',' - | sed 's/,/, /g'
 }
 
 run_ok() {
@@ -652,8 +675,22 @@ consuela_main() {
   print_plan
   echo
 
-  if [ "$DO_XCODE" -eq 1 ]; then
-    echo "Do not run this while Xcode tests are executing."
+  need_confirm=$((1 - YES))
+
+  xcode_guard=
+  if plan_has_group xcode; then
+    if ! xcode_tools=$(running_xcode_tools); then
+      xcode_guard="Xcode tool check failed"
+      echo "$xcode_guard. Make sure Xcode, Simulator, booted simulators, and xcodebuild are stopped."
+      need_confirm=1
+    elif [ -n "$xcode_tools" ]; then
+      xcode_guard="Xcode tools running: $xcode_tools"
+      echo "$xcode_guard"
+      echo "Stop them before you continue."
+      need_confirm=1
+    elif [ "$DRY_RUN" -eq 0 ]; then
+      echo "Do not start Xcode builds or tests until cleanup finishes."
+    fi
   fi
 
   if [ -n "$DOCKER_TARGET" ]; then
@@ -665,7 +702,10 @@ consuela_main() {
     exit 0
   fi
 
-  if [ "$YES" -eq 0 ]; then
+  if [ "$need_confirm" -eq 1 ]; then
+    if [ "$YES" -eq 1 ] && [ -n "$xcode_guard" ] && [ ! -t 0 ]; then
+      echo "-y ignored: $xcode_guard" >&2
+    fi
     printf 'Proceed? [y/N] '
     read -r ans || ans=n
     echo

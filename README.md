@@ -8,8 +8,6 @@ consuela is a macOS cleanup script that removes leftover Xcode data and develope
 
 The script permanently deletes the data it lists. It asks for confirmation unless you pass `-y`. Do not run it if you need to keep any listed data.
 
-Do not run the Xcode group while Xcode is testing or building.
-
 ## What it cleans
 
 **Xcode (`--xcode`)**
@@ -23,6 +21,8 @@ Do not run the Xcode group while Xcode is testing or building.
 Available simulators, source code, and installed runtimes that Xcode still uses stay in place.
 
 Without Xcode, consuela skips XCTestDevices, unavailable simulators, and unavailable runtimes, and cleans the rest of the group.
+
+When the plan includes Xcode data, consuela checks for your Xcode, Simulator, booted simulators, and `xcodebuild`. If any are running, it lists them and asks for confirmation even when you passed `-y`. It also asks when the check fails. So `-y` does not make an Xcode cleanup unattended while these tools run. Do not start Xcode builds or tests until cleanup finishes.
 
 **Caches (`--cache`)**
 
@@ -57,7 +57,7 @@ Run the full cleanup:
 consuela
 ```
 
-`-y` skips the confirmation prompt. `--dry-run` prints the plan and exits without deleting.
+`-y` skips the confirmation prompt, except in the Xcode and Docker cases described above. `--dry-run` prints the plan and exits without deleting.
 
 ```sh
 consuela --xcode
