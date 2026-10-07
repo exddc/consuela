@@ -334,39 +334,34 @@ filter_xcode_apps() {
   done | sort -u
 }
 
-spotlight_xcode_apps() {
-  mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null || :
-}
-
 xcode_apps() {
   if [ -n "${CONSUELA_FIXTURE_XCODE_APPS-}" ]; then
-    printf '%s\n' "$CONSUELA_FIXTURE_XCODE_APPS" | filter_xcode_apps
-    return 0
-  fi
-  {
-    spotlight_xcode_apps
-    printf '%s\n' /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app
+    printf '%s\n' "$CONSUELA_FIXTURE_XCODE_APPS"
+  else
+    printf '%s\n' "$1" /Applications/Xcode*.app "$HOME"/Applications/Xcode*.app
     printf '%s/../..\n' "$(first_line xcode-select -p)"
-  } | filter_xcode_apps
-}
-
-warn_unless_spotlight_finds_xcode() {
-  [ -z "${CONSUELA_FIXTURE_XCODE_APPS-}" ] || return 0
-  [ -z "$(spotlight_xcode_apps | filter_xcode_apps)" ] || return 0
-  warn "no Xcode in Spotlight; checked only /Applications, ~/Applications, xcode-select"
+  fi | filter_xcode_apps
 }
 
 simctl_scan_unless_multiple_xcodes() {
-  xcodes=$(xcode_apps)
+  scan=$(run_simctl_scan) || scan=
+  if ! printf '%s\n' "$scan" | grep -q '^unavailable_[a-z]* [1-9]'; then
+    printf '%s\n' "$scan"
+    return 0
+  fi
+  spotlight=
+  if [ -z "${CONSUELA_FIXTURE_XCODE_APPS-}" ]; then
+    spotlight=$(mdfind "kMDItemCFBundleIdentifier == 'com.apple.dt.Xcode'" 2>/dev/null | filter_xcode_apps)
+  fi
+  xcodes=$(xcode_apps "$spotlight")
   n=$(printf '%s\n' "$xcodes" | grep -c .) || :
   if [ "$n" -gt 1 ]; then
     warn "found $n Xcodes; skipping unavailable simulators and runtimes:"
     printf '%s\n' "$xcodes" | sed 's/^/  /' >&2
     return 0
   fi
-  scan=$(run_simctl_scan) || scan=
-  if [ "$n" -eq 1 ] && printf '%s\n' "$scan" | grep -q '^unavailable_[a-z]* [1-9]'; then
-    warn_unless_spotlight_finds_xcode
+  if [ "$n" -eq 1 ] && [ -z "$spotlight" ] && [ -z "${CONSUELA_FIXTURE_XCODE_APPS-}" ]; then
+    warn "no Xcode in Spotlight; checked only /Applications, ~/Applications, xcode-select"
   fi
   printf '%s\n' "$scan"
 }

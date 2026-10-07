@@ -22,7 +22,7 @@ Do not run the Xcode group while Xcode is testing or building.
 
 consuela keeps available simulators, source code, and runtimes that a found Xcode still uses.
 
-`simctl` decides what is unavailable for the selected Xcode only. Another Xcode, such as Xcode-beta, may still need those simulators and runtimes. When consuela finds more than one Xcode, it skips `xcrun simctl delete unavailable` and `xcrun simctl runtime delete`, lists the Xcodes it found, and still cleans the other Xcode items. To remove an old runtime yourself, run `xcrun simctl runtime list`, check that no Xcode still needs it, then run `xcrun simctl runtime delete <id>`.
+`simctl` decides what is unavailable for the selected Xcode only. Another Xcode, such as Xcode-beta, may still need those simulators and runtimes. When there are unavailable simulators or runtimes and consuela finds more than one Xcode, it skips `xcrun simctl delete unavailable` and `xcrun simctl runtime delete`, lists the Xcodes it found, and still cleans the other Xcode items. To remove an old runtime yourself, run `xcrun simctl runtime list`, check that no Xcode still needs it, then run `xcrun simctl runtime delete <id>`.
 
 consuela finds Xcode with Spotlight, in `/Applications` and `~/Applications`, and at the `xcode-select` path. It ignores Xcodes in the Trash. An Xcode on another mounted volume counts only if Spotlight reports it or it is the selected Xcode. If Spotlight reports no Xcode and there are unavailable simulators or runtimes to delete, consuela warns that it checked only those folders and the selected Xcode.
 
