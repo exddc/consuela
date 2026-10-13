@@ -5,34 +5,56 @@ set -eu
 
 NL='
 '
+TAB=$(printf '\t')
+TILDE='~'
 
 usage() {
   cat <<'EOF'
 usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling]
-                [-y] [--dry-run]
+                [--xcode-previews] [--xcodebuildmcp]
+                [--docker-volume NAME]... [-y] [--dry-run]
+       consuela --report [-y]
        consuela --update
 
-With no group flags, scans and cleans every group after confirmation.
+With no group flags, scans and cleans --xcode, --cache, and --docker after
+confirmation. The other flags are opt-in and never part of a default run.
+Any group flag limits the run to the groups you name.
 
   --xcode             XCTestDevices, unavailable simulators and runtimes
                       (skipped when consuela finds more than one Xcode),
                       DerivedData, CoreSimulator caches, simulator logs,
                       xcodebuild cache, SwiftPM cache, CocoaPods cache
-  --cache             npm, Yarn, pnpm, Bun, pip, uv, Homebrew download cache
+  --cache             npm, Yarn, pnpm, Bun, pip, uv, Poetry (cache and
+                      artifacts; virtualenvs kept), Homebrew download cache
   --docker            unused images (including tagged), containers, build
                       cache; volumes kept. Same as --docker-all
   --docker-all        same as --docker
   --docker-dangling   dangling images, stopped containers, and build cache;
                       volumes kept
+
+Opt-in:
+  --xcode-previews    Xcode Previews simulators
+                      (xcrun simctl --set <Previews set> delete all)
+  --xcodebuildmcp     XcodeBuildMCP DerivedData and finished test products;
+                      workspaces with a held lock are skipped
+  --docker-volume NAME
+                      delete one named Docker volume; repeat for more.
+                      Each needs the name typed at a terminal, even with -y.
+                      Refused for volumes a container uses and for
+                      endpoints that are not a local unix:// socket
+
   -y, --yes           skip the prompt; still asks while Xcode tools run;
                       Docker cleanup is skipped unless Docker uses a
                       local unix:// socket
   --dry-run           print the plan without deleting
+  --report            print a read-only storage report: cleanup targets per
+                      flag, Docker volumes, and data to review by hand.
+                      Never deletes, even with -y
   --update            replace this consuela file with the latest version
                       from GitHub; must be the only argument
 
-Exits 0 after a dry run, when nothing needs cleaning, when every step
-succeeds, or after an update. Exits 1 for a usage error, a declined
+Exits 0 after a dry run or report, when nothing needs cleaning, when every
+step succeeds, or after an update. Exits 1 for a usage error, a declined
 prompt, a failed step, a failed update, or when consuela cannot start.
 Failed steps are listed on stderr. Anything that cannot be scanned, such
 as Docker with the daemon stopped, prints a warning and is skipped
@@ -121,6 +143,29 @@ canonical_dir() {
   printf '%s\n' "$resolved"
 }
 
+# Like canonical_dir, but also resolves a file or a missing last component.
+canonical_path() {
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    canonical_dir "$1"
+    return
+  fi
+  parent=$(canonical_dir "${1%/*}") || return 1
+  printf '%s/%s\n' "$parent" "${1##*/}"
+}
+
+# Prints "<kb> ok", "<kb> partial" when du could not read everything, or
+# "missing".
+measure_kb() {
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then
+    echo missing
+    return 0
+  fi
+  st=ok
+  out=$(du -sk "$1" 2>/dev/null) || st=partial
+  kb=${out%%[!0-9]*}
+  printf '%s %s\n' "${kb:-0}" "$st"
+}
+
 # If command exists and prints a non-empty first line, use that; else fallback.
 # Usage: cache_path_or_default <fallback> <cmd> [args...]
 cache_path_or_default() {
@@ -185,9 +230,23 @@ path_is_allowed_real() {
     "$h"/Library/Logs/CoreSimulator|"$h"/Library/Logs/CoreSimulator/*|\
     "$h"/.npm|"$h"/.npm/*|\
     "$h"/.bun/install/cache|"$h"/.bun/install/cache/*|\
-    "$h"/.yarn/cache|"$h"/.yarn/cache/*) return 0 ;;
+    "$h"/.yarn/cache|"$h"/.yarn/cache/*|\
+    "$h/Library/Developer/Xcode/UserData/Previews/Simulator Devices") return 0 ;;
   esac
-  return 1
+  mcp_generated_path "$1" DerivedData
+}
+
+MCP_WORKSPACES_REL=Library/Developer/XcodeBuildMCP/workspaces
+
+# Succeeds when $1 is exactly <XcodeBuildMCP workspaces>/<one name>/$2.
+mcp_generated_path() {
+  mgp_rest=${1#"$HOME_REAL/$MCP_WORKSPACES_REL/"}
+  [ "$mgp_rest" != "$1" ] || return 1
+  mgp_ws=${mgp_rest%%/*}
+  case "$mgp_ws" in
+    ''|.|..) return 1 ;;
+  esac
+  [ "$mgp_rest" = "$mgp_ws/$2" ]
 }
 
 path_is_allowed() {
@@ -232,6 +291,34 @@ EOF
 plan_init() {
   PLAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/consuela.XXXXXX")
   PLAN_COUNT=0
+  CLAIMED=
+}
+
+# Sets CLAIMED_PATHS to the paths in $1 that do not overlap a path an
+# earlier plan line already counts, and claims them. Warns about the rest.
+# Runs in the current shell so the claims persist.
+claim_paths() {
+  CLAIMED_PATHS=
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    real=$(canonical_path "$p") || real=$p
+    clash=
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      case "$real/" in "$c/"*) clash=$c ;; esac
+      case "$c/" in "$real/"*) clash=$c ;; esac
+    done <<EOF
+$CLAIMED
+EOF
+    if [ -n "$clash" ]; then
+      warn "skipping $p: overlaps $clash, already in the plan"
+      continue
+    fi
+    CLAIMED="$CLAIMED$real$NL"
+    CLAIMED_PATHS="$CLAIMED_PATHS$p$NL"
+  done <<EOF
+$1
+EOF
 }
 
 plan_rec() {
@@ -248,13 +335,19 @@ add() {
   case "$kb" in
     ''|*[!0-9]*) kb=0 ;;
   esac
-  [ "$kb" -gt 0 ] || return 0
+  if [ "$kind" != unknown ]; then
+    [ "$kb" -gt 0 ] || return 0
+  fi
   PLAN_COUNT=$((PLAN_COUNT + 1))
   rec=$(plan_rec "$PLAN_COUNT")
   mkdir "$rec"
   printf '%s\n' "$group" >"$rec/group"
   printf '%s\n' "$kb" >"$rec/kb"
-  fmt_kb "$kb" >"$rec/size"
+  if [ "$kind" = unknown ]; then
+    echo '?' >"$rec/size"
+  else
+    fmt_kb "$kb" >"$rec/size"
+  fi
   printf '%s\n' "$label" >"$rec/label"
   printf '%s\n' "$action" >"$rec/action"
   printf '%s' "$arg" >"$rec/arg"
@@ -265,18 +358,25 @@ add_estimate() {
   add "$1" "$2" "$3" "$4" "${5-}" estimate
 }
 
-# Usage: add_clear <group> <label> <newline-separated paths>
-add_clear() {
-  paths=$(allowed_paths "$3")
-  add "$1" "$(printf '%s\n' "$paths" | paths_du_kb)" "$2" clear_dir "$paths"
+claimed_kb() {
+  printf '%s' "$CLAIMED_PATHS" | paths_du_kb
 }
 
+# Usage: add_clear <group> <label> <newline-separated paths> [action]
+add_clear() {
+  claim_paths "$(allowed_paths "$3")"
+  paths=${CLAIMED_PATHS%"$NL"}
+  add "$1" "$(printf '%s\n' "$paths" | paths_du_kb)" "$2" "${4:-clear_dir}" "$paths"
+}
+
+# Usage: sum_plan_kb [kind] [space-separated groups]
 sum_plan_kb() {
   s=0
   i=1
   while [ "$i" -le "$PLAN_COUNT" ]; do
     rec=$(plan_rec "$i")
-    if [ -z "${1-}" ] || [ "$(sed -n '1p' "$rec/kind")" = "$1" ]; then
+    if { [ -z "${1-}" ] || [ "$(sed -n '1p' "$rec/kind")" = "$1" ]; } &&
+      in_groups "$(sed -n '1p' "$rec/group")" "${2-}"; then
       kb=$(sed -n '1p' "$rec/kb")
       s=$((s + kb))
     fi
@@ -285,16 +385,51 @@ sum_plan_kb() {
   printf '%s\n' "$s"
 }
 
-fmt_run_total() {
-  if [ "$2" -le 0 ]; then
-    fmt_kb "$1"
-  elif [ "$1" -le 0 ]; then
-    printf '~%s estimated' "$(fmt_kb "$2")"
-  else
-    printf '%s, plus ~%s estimated' "$(fmt_kb "$1")" "$(fmt_kb "$2")"
-  fi
+# Usage: count_plan <kind> [space-separated groups]
+count_plan() {
+  n=0
+  i=1
+  while [ "$i" -le "$PLAN_COUNT" ]; do
+    rec=$(plan_rec "$i")
+    if [ "$(sed -n '1p' "$rec/kind")" = "$1" ] &&
+      in_groups "$(sed -n '1p' "$rec/group")" "${2-}"; then
+      n=$((n + 1))
+    fi
+    i=$((i + 1))
+  done
+  printf '%s\n' "$n"
 }
 
+# An empty group list matches every group.
+in_groups() {
+  [ -n "$2" ] || return 0
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Usage: fmt_run_total <firm kb> <estimated kb> [items of unknown size]
+fmt_run_total() {
+  unknown=${3:-0}
+  if [ "$2" -le 0 ]; then
+    out=$(fmt_kb "$1")
+  elif [ "$1" -le 0 ]; then
+    out="~$(fmt_kb "$2") estimated"
+  else
+    out="$(fmt_kb "$1"), plus ~$(fmt_kb "$2") estimated"
+  fi
+  if [ "$unknown" -gt 0 ]; then
+    if [ "$1" -le 0 ] && [ "$2" -le 0 ]; then
+      out="$unknown item(s) of unknown size"
+    else
+      out="$out, plus $unknown item(s) of unknown size"
+    fi
+  fi
+  printf '%s' "$out"
+}
+
+# Usage: print_plan <pad> [print group flag]
 print_plan() {
   pad=
   if [ "${1:-0}" -gt 0 ]; then
@@ -307,7 +442,11 @@ print_plan() {
     if [ "$(sed -n '1p' "$rec/kind")" = estimate ]; then
       mark='~'
     fi
-    printf '  %s%8s  %s\n' "$mark" "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
+    flag=
+    if [ -n "${2-}" ]; then
+      flag=$(printf '%-17s ' "--$(sed -n '1p' "$rec/group")")
+    fi
+    printf '  %s%s%8s  %s\n' "$flag" "$mark" "$(sed -n '1p' "$rec/size")" "$(sed -n '1p' "$rec/label")"
     i=$((i + 1))
   done
 }
@@ -321,19 +460,35 @@ plan_has_group() {
   grep -qxF -- "$1" "$PLAN_DIR"/*/group 2>/dev/null
 }
 
-running_xcode_tools() {
+plan_has_xcode() {
+  plan_has_group xcode || plan_has_group xcode-previews || plan_has_group xcodebuildmcp
+}
+
+# Prints matching processes, nothing when none run. Fails when pgrep cannot
+# answer. Usage: pgrep_procs <pgrep args...>
+pgrep_procs() {
   if ! have pgrep; then
     warn "pgrep not found"
     return 1
   fi
-  procs=$(pgrep -lx -u "$(id -u)" 'Xcode|Simulator|xcodebuild|launchd_sim') || {
-    rc=$?
-    if [ "$rc" -eq 1 ]; then
-      return 0
+  pgrep "$@" && return 0
+  rc=$?
+  if [ "$rc" -eq 1 ]; then
+    return 0
+  fi
+  warn "pgrep exited $rc"
+  return 1
+}
+
+running_xcode_tools() {
+  procs=$(pgrep_procs -lx -u "$(id -u)" 'Xcode|Simulator|xcodebuild|launchd_sim') || return 1
+  if plan_has_group xcodebuildmcp; then
+    mcp=$(pgrep_procs -f -u "$(id -u)" '[/]xcodebuildmcp([/ ]|$)') || return 1
+    if [ -n "$mcp" ]; then
+      procs="$procs${procs:+$NL}0 XcodeBuildMCP"
     fi
-    warn "pgrep exited $rc"
-    return 1
-  }
+  fi
+  [ -n "$procs" ] || return 0
   printf '%s\n' "$procs" |
     awk '{ print ($2 == "launchd_sim" ? "booted simulator" : $2) }' |
     LC_ALL=C sort -u | paste -sd ',' - | sed 's/,/, /g'
@@ -473,8 +628,9 @@ simctl_scan_unless_multiple_xcodes() {
 
 scan_xcode() {
   if xcode_ready; then
-    XCTEST_DEVICES=$(allowed_paths "$HOME/Library/Developer/XCTestDevices")
-    add xcode "$(du_kb "$XCTEST_DEVICES")" "XCTestDevices" xctest "$XCTEST_DEVICES"
+    claim_paths "$(allowed_paths "$HOME/Library/Developer/XCTestDevices")"
+    XCTEST_DEVICES=${CLAIMED_PATHS%"$NL"}
+    add xcode "$(claimed_kb)" "XCTestDevices" simctl_set "$XCTEST_DEVICES"
 
     scan_out=$(simctl_scan_unless_multiple_xcodes) || scan_out=
     while IFS= read -r line; do
@@ -509,31 +665,208 @@ EOF
 
   cocoapods="$HOME/Library/Caches/CocoaPods"
   if have pod; then
-    add xcode "$(du_kb "$cocoapods")" "CocoaPods cache clean --all" cocoapods "$cocoapods"
+    claim_paths "$cocoapods"
+    add xcode "$(claimed_kb)" "CocoaPods cache clean --all" cocoapods "$cocoapods"
   else
     add_clear xcode "CocoaPods cache directory" "$cocoapods"
   fi
 }
 
+PREVIEWS_REL="Library/Developer/Xcode/UserData/Previews"
+
+# Kilobytes in devices of a simctl device set; folders without a
+# device.plist are not devices simctl can delete.
+device_set_kb() {
+  total=0
+  for dev in "$1"/*/; do
+    dev=${dev%/}
+    [ -f "$dev/device.plist" ] || continue
+    [ ! -L "$dev" ] || continue
+    total=$((total + $(du_kb "$dev")))
+  done
+  printf '%s\n' "$total"
+}
+
+scan_xcode_previews() {
+  set_dir="$HOME/$PREVIEWS_REL/Simulator Devices"
+  [ -d "$set_dir" ] || return 0
+  if ! xcode_ready; then
+    warn "Xcode not found; skipping Xcode Previews simulators"
+    return 0
+  fi
+  claim_paths "$(allowed_paths "$set_dir")"
+  p=${CLAIMED_PATHS%"$NL"}
+  [ -n "$p" ] || return 0
+  add xcode-previews "$(device_set_kb "$p")" \
+    "Xcode Previews simulators (simctl --set <Previews set> delete all)" simctl_set "$p"
+}
+
+# Test products names XcodeBuildMCP creates: <tool>_<UTC time>_pid<n>_<hex>.
+MCP_TEST_PRODUCTS_RE='^[A-Za-z0-9][A-Za-z0-9_-]*_[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}Z_pid[0-9]+_[a-f0-9]{8}\.xctestproducts$'
+
+# Without ps, every process counts as alive.
+pid_alive() {
+  have ps || return 0
+  ps -p "$1" >/dev/null 2>&1
+}
+
+# Fails when $1 is not an XcodeBuildMCP test products folder that its
+# owner process has finished with.
+mcp_test_products_done() {
+  name=${1##*/}
+  printf '%s\n' "$name" | grep -Eq "$MCP_TEST_PRODUCTS_RE" || return 1
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  [ -f "$1.xcodebuildmcp-completed" ] && return 0
+  pid=${name##*_pid}
+  pid=${pid%%_*}
+  ! pid_alive "$pid"
+}
+
+# Fails when the workspace at $1 holds an XcodeBuildMCP lock or when its
+# locks folder cannot be read.
+mcp_workspace_idle() {
+  [ -e "$1/locks" ] || return 0
+  [ -d "$1/locks" ] && [ ! -L "$1/locks" ] || return 1
+  held=$(find "$1/locks" -mindepth 1 -maxdepth 1 2>/dev/null) || return 1
+  [ -z "$held" ]
+}
+
+# Fails unless every entry in DerivedData folder $1 is a folder Xcode made:
+# a project folder with info.plist, or a *.noindex cache.
+mcp_derived_data_generated() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  entries=$(find "$1" -mindepth 1 -maxdepth 1 2>/dev/null) || return 1
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    [ -d "$e" ] && [ ! -L "$e" ] || return 1
+    case "${e##*/}" in
+      *.noindex) continue ;;
+    esac
+    [ -f "$e/info.plist" ] && [ ! -L "$e/info.plist" ] || return 1
+  done <<EOF
+$entries
+EOF
+}
+
+scan_xcodebuildmcp() {
+  root="$HOME/$MCP_WORKSPACES_REL"
+  [ -e "$root" ] || return 0
+  if [ -L "$root" ] || [ "$(canonical_dir "$root")" != "$HOME_REAL/$MCP_WORKSPACES_REL" ]; then
+    warn "skipping unsafe path: $root"
+    return 0
+  fi
+  root=$HOME_REAL/$MCP_WORKSPACES_REL
+  dd_paths=
+  tp_paths=
+  tp_kb=0
+  tp_count=0
+  for ws in "$root"/*; do
+    [ -d "$ws" ] || continue
+    case "$ws" in
+      *"$NL"*) warn "skipping XcodeBuildMCP workspace with a newline in its name"; continue ;;
+    esac
+    if [ -L "$ws" ]; then
+      warn "skipping unsafe path: $ws"
+      continue
+    fi
+    if ! mcp_workspace_idle "$ws"; then
+      warn "skipping XcodeBuildMCP workspace ${ws##*/}: it holds a lock or its locks folder is unreadable"
+      continue
+    fi
+    dd="$ws/DerivedData"
+    if [ -e "$dd" ] || [ -L "$dd" ]; then
+      if ! mcp_derived_data_generated "$dd"; then
+        warn "skipping $dd: it holds entries Xcode did not create, or a symlink"
+      elif path_is_allowed "$dd"; then
+        dd_paths="$dd_paths$dd$NL"
+      else
+        warn "skipping unsafe path: $dd"
+      fi
+    fi
+    tp="$ws/test-products"
+    [ -d "$tp" ] || continue
+    if [ -L "$tp" ]; then
+      warn "skipping unsafe path: $tp"
+      continue
+    fi
+    for t in "$tp"/*.xctestproducts; do
+      mcp_test_products_done "$t" || continue
+      tp_paths="$tp_paths$t$NL"
+    done
+  done
+  claim_paths "$dd_paths"
+  dd_paths=${CLAIMED_PATHS%"$NL"}
+  dd_n=$(printf '%s' "$dd_paths" | grep -c . || :)
+  add xcodebuildmcp "$(printf '%s\n' "$dd_paths" | paths_du_kb)" \
+    "XcodeBuildMCP DerivedData contents ($dd_n workspace(s))" mcp_derived_data "$dd_paths"
+  claim_paths "$tp_paths"
+  tp_paths=${CLAIMED_PATHS%"$NL"}
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    tp_count=$((tp_count + 1))
+    tp_kb=$((tp_kb + $(du_kb "$t") + $(du_kb "$t.xcodebuildmcp-completed")))
+  done <<EOF
+$tp_paths
+EOF
+  add xcodebuildmcp "$tp_kb" \
+    "XcodeBuildMCP finished test products ($tp_count run(s))" mcp_test_products "$tp_paths"
+}
+
+# Prints the path a ShipItState.plist file:// URL key points to. Fails when
+# the key is missing or the file cannot be parsed.
+shipit_url_path() {
+  url=$(plutil -extract "$2" raw -o - "$1" 2>/dev/null) || return 1
+  case "$url" in
+    file://*) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "${url#file://}" | sed 's/%20/ /g; s:/*$::'
+}
+
+# Usage: poetry_paths <cache-dir>. Prints the cache and artifacts folders,
+# or nothing when Poetry keeps virtualenvs inside one of them.
+poetry_paths() {
+  venvs=
+  if have poetry; then
+    venvs=$(first_line poetry config virtualenvs.path)
+  fi
+  for sub in cache artifacts; do
+    p="$1/$sub"
+    real=$(canonical_path "$p" 2>/dev/null) || real=$p
+    vreal=$(canonical_path "$venvs" 2>/dev/null) || vreal=$venvs
+    if [ -n "$venvs" ]; then
+      case "$vreal/" in
+        "$real/"*)
+          warn "skipping Poetry $sub: virtualenvs.path $venvs is inside it"
+          continue
+          ;;
+      esac
+    fi
+    printf '%s\n' "$p"
+  done
+}
+
 scan_cache() {
   npm_cache=$(cache_path_or_default "$HOME/.npm" npm config get cache)
   if have npm; then
-    add cache "$(du_kb "$npm_cache")" "npm cache clean --force" npm_clean "$npm_cache"
+    claim_paths "$npm_cache"
+    add cache "$(claimed_kb)" "npm cache clean --force" npm_clean "$npm_cache"
   else
     add_clear cache "npm cache directory" "$npm_cache"
   fi
 
   yarn_arg=$(yarn_cache_paths)
   if have yarn; then
-    yarn_kb=$(printf '%s\n' "$yarn_arg" | paths_du_kb)
-    add cache "$yarn_kb" "Yarn cache clean" yarn_clean "$yarn_arg"
+    claim_paths "$yarn_arg"
+    add cache "$(claimed_kb)" "Yarn cache clean" yarn_clean "$yarn_arg"
   else
     add_clear cache "Yarn cache directories" "$yarn_arg"
   fi
 
   pnpm_store=$(cache_path_or_default "$HOME/Library/pnpm/store" pnpm store path)
   if have pnpm; then
-    add_estimate cache "$(du_kb "$pnpm_store")" \
+    claim_paths "$pnpm_store"
+    add_estimate cache "$(claimed_kb)" \
       "pnpm store prune (unreferenced packages)" pnpm_prune "$pnpm_store"
   fi
 
@@ -545,7 +878,8 @@ scan_cache() {
     pip_cache=$(first_line python3 -m pip cache dir)
   fi
   if [ -n "$pip_cache" ]; then
-    add cache "$(du_kb "$pip_cache")" "pip cache purge" pip_purge "$pip_cache"
+    claim_paths "$pip_cache"
+    add cache "$(claimed_kb)" "pip cache purge" pip_purge "$pip_cache"
   else
     pip_cache="$HOME/Library/Caches/pip"
     add_clear cache "pip cache directory" "$pip_cache"
@@ -553,84 +887,316 @@ scan_cache() {
 
   uv_arg=$(uv_cache_paths)
   if have uv; then
-    uv_kb=$(printf '%s\n' "$uv_arg" | paths_du_kb)
-    add cache "$uv_kb" "uv cache clean" uv_clean "$uv_arg"
+    claim_paths "$uv_arg"
+    add cache "$(claimed_kb)" "uv cache clean" uv_clean "$uv_arg"
   else
     add_clear cache "uv cache directories" "$uv_arg"
   fi
+
+  poetry_dir=$(cache_path_or_default "$HOME/Library/Caches/pypoetry" poetry config cache-dir)
+  case "$poetry_dir" in
+    /*) ;;
+    *) poetry_dir="$HOME/Library/Caches/pypoetry" ;;
+  esac
+  add_clear cache "Poetry cache and artifacts (virtualenvs kept)" "$(poetry_paths "$poetry_dir")"
 
   brew_cache=$(cache_path_or_default "$HOME/Library/Caches/Homebrew" brew --cache)
   add_clear cache "Homebrew download cache" "$brew_cache"
 }
 
-scan_docker() {
+# Docker reports sizes in decimal units, for example 6.844GB or 0B (0%).
+# Prints ? for a size it cannot read.
+docker_size_kb() {
+  awk -v s="$1" 'BEGIN {
+    gsub(/ .*/, "", s)
+    n = s + 0
+    u = s
+    gsub(/[0-9.]/, "", u)
+    u = toupper(u)
+    if (u == "B") kb = n / 1024
+    else if (u == "KB") kb = n * 1000 / 1024
+    else if (u == "MB") kb = n * 1000 ^ 2 / 1024
+    else if (u == "GB") kb = n * 1000 ^ 3 / 1024
+    else if (u == "TB") kb = n * 1000 ^ 4 / 1024
+    else { print "?"; exit }
+    printf "%d\n", kb
+  }'
+}
+
+# Resolves the Docker context once. Every later docker call passes
+# --context "$DOCKER_CTX", so scans and actions use the same daemon.
+docker_context() {
+  case "$DOCKER_CTX_STATE" in
+    ok) return 0 ;;
+    failed) return 1 ;;
+  esac
+  DOCKER_CTX_STATE=failed
   if ! have docker; then
-    warn "docker not found; skipping docker cleanup"
-    return 0
+    warn "docker not found; skipping docker"
+    return 1
   fi
   # Without a name, inspects the context docker commands would use.
   ctx_line=$(first_line docker context inspect --format '{{.Name}} {{.Endpoints.docker.Host}}')
   ctx=${ctx_line%% *}
   endpoint=${ctx_line#* }
   if [ -z "$ctx" ]; then
-    warn "cannot resolve the docker context; skipping docker cleanup"
-    return 0
+    warn "cannot resolve the docker context; skipping docker"
+    return 1
   fi
   case "$endpoint" in
     ''|'<no value>') endpoint=unknown ;;
   esac
-  case "$endpoint" in
-    unix://*) ;;
-    *)
-      if [ "$YES" -eq 1 ]; then
-        warn "docker endpoint $endpoint is not a local unix:// socket; skipping docker cleanup. Run without -y to confirm."
-        return 0
-      fi
-      ;;
+  DOCKER_CTX=$ctx
+  DOCKER_ENDPOINT=$endpoint
+  DOCKER_CTX_STATE=ok
+}
+
+docker_endpoint_local() {
+  case "$DOCKER_ENDPOINT" in
+    unix://*) return 0 ;;
   esac
-  df_out=$(docker --context "$ctx" system df --format '{{.Type}}\t{{.Reclaimable}}' 2>/dev/null) || {
+  return 1
+}
+
+# Sets DOCKER_VOLUME_ROWS to "name<TAB>links<TAB>size" lines, once.
+docker_volume_rows() {
+  case "$DOCKER_VOLUMES_STATE" in
+    ok) return 0 ;;
+    failed) return 1 ;;
+  esac
+  DOCKER_VOLUMES_STATE=failed
+  DOCKER_VOLUME_ROWS=$(docker --context "$DOCKER_CTX" system df -v \
+    --format '{{range .Volumes}}{{.Name}}{{"\t"}}{{.Links}}{{"\t"}}{{.Size}}{{println}}{{end}}' 2>/dev/null) || {
+    warn "cannot list Docker volumes"
+    return 1
+  }
+  DOCKER_VOLUMES_STATE=ok
+}
+
+scan_docker() {
+  docker_context || return 0
+  if ! docker_endpoint_local && [ "$YES" -eq 1 ]; then
+    warn "docker endpoint $DOCKER_ENDPOINT is not a local unix:// socket; skipping docker cleanup. Run without -y to confirm."
+    return 0
+  fi
+  DOCKER_DF=$(docker --context "$DOCKER_CTX" system df --format '{{.Type}}\t{{.Size}}\t{{.Reclaimable}}' 2>/dev/null) || {
     warn "docker is not reachable; skipping docker cleanup"
+    DOCKER_DF=
     return 0
   }
-  docker_kb=$(
-    printf '%s\n' "$df_out" | awk -F '\t' '
-      function to_kb(s,   n, u) {
-        gsub(/ .*/, "", s)
-        n = s + 0
-        u = s
-        gsub(/[0-9.]/, "", u)
-        u = toupper(u)
-        if (u == "B") return n / 1024
-        if (u == "KB") return n * 1000 / 1024
-        if (u == "MB") return n * 1000 ^ 2 / 1024
-        if (u == "GB") return n * 1000 ^ 3 / 1024
-        if (u == "TB") return n * 1000 ^ 4 / 1024
-        return 0
-      }
-      $1 == "Local Volumes" { next }
-      { kb += to_kb($2) }
-      END { printf "%d", kb }
-    '
-  )
+  docker_kb=0
+  while IFS="$TAB" read -r type _ reclaimable; do
+    case "$type" in
+      ''|'Local Volumes') continue ;;
+    esac
+    kb=$(docker_size_kb "$reclaimable")
+    case "$kb" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    docker_kb=$((docker_kb + kb))
+  done <<EOF
+$DOCKER_DF
+EOF
   if [ "$DOCKER_MODE" = dangling ]; then
     add_estimate docker "$docker_kb" \
       "Docker dangling images, containers, build cache; volumes kept" \
-      docker_dangling "$ctx"
+      docker_dangling "$DOCKER_CTX"
   else
     add_estimate docker "$docker_kb" \
       "Docker unused images (including tagged), containers, build cache; volumes kept" \
-      docker_all "$ctx"
+      docker_all "$DOCKER_CTX"
   fi
   if [ "$docker_kb" -gt 0 ]; then
-    DOCKER_TARGET="$endpoint (context $ctx)"
+    DOCKER_TARGET="$DOCKER_ENDPOINT (context $DOCKER_CTX)"
   fi
+  DOCKER_SHOW_VOLUMES=1
+}
+
+# Docker's own volume name rule.
+valid_volume_name() {
+  case "$1" in
+    *"$NL"*) return 1 ;;
+  esac
+  printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
+}
+
+# Prints the IDs of containers, running or stopped, that mount volume $1.
+# Fails when docker cannot answer.
+docker_volume_users() {
+  docker --context "$DOCKER_CTX" ps -a -q --filter "volume=$1" 2>/dev/null
+}
+
+scan_docker_volumes() {
+  docker_context || return 0
+  if ! docker_endpoint_local; then
+    warn "docker endpoint $DOCKER_ENDPOINT is not a local unix:// socket; refusing to delete Docker volumes"
+    return 0
+  fi
+  docker_volume_rows || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! docker --context "$DOCKER_CTX" volume inspect --format '{{.Name}}' "$name" >/dev/null 2>&1; then
+      warn "Docker volume $name not found on $DOCKER_ENDPOINT; skipping it"
+      continue
+    fi
+    row=$(printf '%s\n' "$DOCKER_VOLUME_ROWS" | awk -F '\t' -v n="$name" '$1 == n' | sed -n '1p')
+    if [ -z "$row" ]; then
+      warn "cannot tell whether a container uses Docker volume $name; keeping it"
+      continue
+    fi
+    links=$(printf '%s\n' "$row" | cut -f 2)
+    size=$(printf '%s\n' "$row" | cut -f 3)
+    if ! users=$(docker_volume_users "$name"); then
+      warn "cannot list containers that use Docker volume $name; keeping it"
+      continue
+    fi
+    if [ "$links" != 0 ] || [ -n "$users" ]; then
+      warn "Docker volume $name is used by a container or its use is unknown; keeping it"
+      continue
+    fi
+    kb=$(docker_size_kb "$size")
+    label="Docker volume $name (docker volume rm; type the name to confirm)"
+    arg="$DOCKER_CTX$TAB$DOCKER_ENDPOINT$TAB$name"
+    case "$kb" in
+      ''|*[!0-9]*|0) add docker-volume 0 "$label" docker_volume "$arg" unknown ;;
+      *) add_estimate docker-volume "$kb" "$label" docker_volume "$arg" ;;
+    esac
+    DOCKER_TARGET="$DOCKER_ENDPOINT (context $DOCKER_CTX)"
+  done <<EOF
+$DOCKER_VOLUMES
+EOF
+}
+
+# Lists Docker volumes. None is part of a plan unless named with
+# --docker-volume.
+print_docker_volumes() {
+  docker_volume_rows || return 0
+  [ -n "$DOCKER_VOLUME_ROWS" ] || return 0
+  echo "Docker volumes kept (context $DOCKER_CTX, $DOCKER_ENDPOINT):"
+  while IFS="$TAB" read -r name links size; do
+    [ -n "$name" ] || continue
+    if printf '%s' "$DOCKER_VOLUMES" | grep -qxF -- "$name"; then
+      continue
+    fi
+    kb=$(docker_size_kb "$size")
+    case "$kb" in
+      ''|*[!0-9]*) shown='?' ;;
+      *) shown=$(fmt_kb "$kb") ;;
+    esac
+    case "$links" in
+      0) use="no containers use it" ;;
+      ''|*[!0-9]*) use="container use unknown" ;;
+      *) use="used by $links container(s)" ;;
+    esac
+    if printf '%s\n' "$name" | grep -Eq '^[0-9a-f]{64}$'; then
+      use="$use; anonymous"
+    fi
+    printf '  %8s  %s  (%s)\n' "$shown" "$name" "$use"
+  done <<EOF
+$DOCKER_VOLUME_ROWS
+EOF
+  echo "  To delete one: consuela --docker-volume NAME, then type the name."
+}
+
+# Rechecks each planned XcodeBuildMCP DerivedData folder, then wipes its
+# contents.
+mcp_derived_data_clear() {
+  while IFS= read -r dd; do
+    [ -n "$dd" ] || continue
+    [ -e "$dd" ] || [ -L "$dd" ] || continue
+    ws=${dd%/*}
+    if ! mcp_workspace_idle "$ws"; then
+      echo "  skipped ${ws##*/}: XcodeBuildMCP holds a lock there now" >&2
+      fail
+    elif ! mcp_derived_data_generated "$dd"; then
+      echo "refusing to delete unsafe path: $dd" >&2
+      fail
+    else
+      run_ok clear_dir "$dd"
+    fi
+  done <<EOF
+$1
+EOF
+}
+
+# Rechecks each planned test products folder, then deletes it and its
+# completion marker.
+mcp_test_products_remove() {
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    [ -e "$t" ] || [ -L "$t" ] || continue
+    if ! parent=$(canonical_dir "${t%/*}") ||
+      ! mcp_generated_path "$parent" test-products ||
+      [ -L "${t%/*}" ] ||
+      ! mcp_test_products_done "$parent/${t##*/}"; then
+      echo "refusing to delete unsafe or active path: $t" >&2
+      fail
+      continue
+    fi
+    if ! mcp_workspace_idle "${parent%/*}"; then
+      echo "  skipped $t: XcodeBuildMCP holds a lock there now" >&2
+      fail
+      continue
+    fi
+    real="$parent/${t##*/}"
+    run_ok rm -rf -- "$real"
+    if [ -f "$real.xcodebuildmcp-completed" ] && [ ! -L "$real.xcodebuildmcp-completed" ]; then
+      run_ok rm -f -- "$real.xcodebuildmcp-completed"
+    fi
+  done <<EOF
+$1
+EOF
+}
+
+# Deletes one Docker volume after the user types its name at a terminal.
+# Checks the pinned context and the volume's users again right before
+# docker volume rm, which itself refuses volumes in use.
+docker_volume_remove() {
+  ctx=$(printf '%s\n' "$1" | cut -f 1)
+  endpoint=$(printf '%s\n' "$1" | cut -f 2)
+  name=$(printf '%s\n' "$1" | cut -f 3)
+  if ! valid_volume_name "$name"; then
+    echo "refusing invalid volume name: $name" >&2
+    fail
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    echo "  kept Docker volume $name: deleting a volume needs its name typed at a terminal" >&2
+    fail
+    return 0
+  fi
+  echo "  Volume $name on $endpoint (context $ctx). Its data cannot be restored."
+  printf '  Type the volume name to delete it: '
+  read -r typed || typed=
+  if [ "$typed" != "$name" ]; then
+    echo "  kept Docker volume $name: name not confirmed" >&2
+    fail
+    return 0
+  fi
+  now=$(first_line docker context inspect --format '{{.Endpoints.docker.Host}}' "$ctx")
+  if [ "$now" != "$endpoint" ]; then
+    echo "  kept Docker volume $name: context $ctx now points to ${now:-nothing}" >&2
+    fail
+    return 0
+  fi
+  if ! users=$(docker --context "$ctx" ps -a -q --filter "volume=$name" 2>/dev/null); then
+    echo "  kept Docker volume $name: cannot list containers that use it" >&2
+    fail
+    return 0
+  fi
+  if [ -n "$users" ]; then
+    echo "  kept Docker volume $name: a container uses it now" >&2
+    fail
+    return 0
+  fi
+  run_ok docker --context "$ctx" volume rm "$name"
 }
 
 run_action() {
   action=$1
   arg=$2
   case "$action" in
-    xctest)
+    simctl_set)
       if [ -d "$arg" ]; then
         if real=$(canonical_dir "$arg") && path_is_allowed_real "$real"; then
           run_ok xcrun simctl --set "$real" delete all
@@ -639,6 +1205,15 @@ run_action() {
           fail
         fi
       fi
+      ;;
+    mcp_derived_data)
+      mcp_derived_data_clear "$arg"
+      ;;
+    mcp_test_products)
+      mcp_test_products_remove "$arg"
+      ;;
+    docker_volume)
+      docker_volume_remove "$arg"
       ;;
     simctl_unavailable)
       run_ok xcrun simctl delete unavailable
@@ -712,6 +1287,202 @@ run_plan() {
   done
 }
 
+# Usage: review_line <path> <label> <note>. Prints nothing for a missing path.
+review_line() {
+  m=$(measure_kb "$1")
+  [ "$m" != missing ] || return 0
+  kb=${m%% *}
+  shown=$(fmt_kb "$kb")
+  if [ "${m#* }" = partial ]; then
+    shown=">$shown"
+    note="$3; part of it is unreadable"
+  else
+    note=$3
+  fi
+  printf '  %9s  %s\n' "$shown" "$2"
+  printf '             %s\n' "$note"
+}
+
+# ShipIt caches hold app updates that Squirrel staged. A pending update is
+# the one named by updateBundleURL in ShipItState.plist, which is JSON.
+report_shipit() {
+  for d in "$HOME"/Library/Caches/*.ShipIt; do
+    [ -d "$d" ] || continue
+    name=${d##*/}
+    if [ -L "$d" ]; then
+      printf '  %9s  ~/Library/Caches/%s\n' '?' "$name"
+      printf '             symlink; not measured\n'
+      continue
+    fi
+    staged=$(find "$d" -mindepth 1 -maxdepth 1 -type d -name 'update.*' 2>/dev/null | grep -c . || :)
+    [ "${staged:-0}" -gt 0 ] || continue
+    note="$staged staged update(s)"
+    if pending=$(shipit_url_path "$d/ShipItState.plist" updateBundleURL); then
+      case "$pending" in
+        "$d"/*)
+          p=${pending#"$d"/}
+          note="$note; pending install: ${p%%/*}"
+          ;;
+      esac
+    else
+      note="$note; ShipItState.plist unreadable"
+    fi
+    if target=$(shipit_url_path "$d/ShipItState.plist" targetBundleURL) && [ -e "$target" ]; then
+      note="$note; app installed at $target"
+    fi
+    if procs=$(pgrep_procs -f "$name" 2>/dev/null) && [ -n "$procs" ]; then
+      note="$note; updater running"
+    fi
+    review_line "$d" "$TILDE/Library/Caches/$name" "$note; let the app finish or discard its update"
+  done
+}
+
+report_fusion() {
+  prod="$HOME/Library/Application Support/Autodesk/webdeploy/production"
+  [ -d "$prod" ] || return 0
+  active=
+  for link in "$prod"/*.app; do
+    [ -L "$link" ] || continue
+    target=$(readlink "$link") || continue
+    case "$target" in
+      /*) ;;
+      *) target="$prod/$target" ;;
+    esac
+    [ -e "$target" ] || continue
+    t=${target#"$prod"/}
+    active="$active${t%%/*}$NL"
+  done
+  for v in "$prod"/*/; do
+    v=${v%/}
+    [ -d "$v" ] && [ ! -L "$v" ] || continue
+    case "${v##*/}" in
+      *.app) continue ;;
+    esac
+    if printf '%s' "$active" | grep -qxF -- "${v##*/}"; then
+      note="active Fusion install (launcher points here); keep"
+    else
+      note="no launcher points here; remove only through Autodesk's tools"
+    fi
+    review_line "$v" "Fusion webdeploy ${v##*/}" "$note"
+  done
+}
+
+report_playwright() {
+  pw="$HOME/Library/Caches/ms-playwright"
+  [ -d "$pw" ] || return 0
+  for b in "$pw"/*/; do
+    b=${b%/}
+    review_line "$b" "Playwright ${b##*/}" \
+      "projects may still use it; npx playwright uninstall keeps browsers other installs use"
+  done
+}
+
+report_previews_orphans() {
+  base="$HOME/$PREVIEWS_REL"
+  n=0
+  orphan_kb=0
+  for d in "$base/Simulator Devices"/*/; do
+    d=${d%/}
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    [ ! -f "$d/device.plist" ] || continue
+    n=$((n + 1))
+    orphan_kb=$((orphan_kb + $(du_kb "$d")))
+  done
+  if [ "$n" -gt 0 ]; then
+    printf '  %9s  %s\n' "$(fmt_kb "$orphan_kb")" "$n folder(s) in the Previews set without device.plist"
+    printf '             %s\n' "not registered simulators, so simctl leaves them"
+  fi
+  review_line "$base/Simulator%20Devices" "$TILDE/$PREVIEWS_REL/Simulator%20Devices" \
+    "not a simctl device set; consuela leaves it"
+}
+
+report_docker_disk() {
+  for img in \
+    "$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw" \
+    "$HOME/Library/Group Containers/HUAQ24HBR6.dev.orbstack/data/data.img"; do
+    [ -f "$img" ] || continue
+    bytes=$(stat -f %z "$img" 2>/dev/null) || continue
+    logical=$(fmt_kb $((bytes / 1024)))
+    review_line "$img" "${img##*/} (allocated on disk)" \
+      "logical size $logical; Docker objects use part of it, the rest is not proven free"
+  done
+  [ -n "$DOCKER_DF" ] || return 0
+  echo "  Docker system df (context $DOCKER_CTX; rows share layers, so do not add them):"
+  printf '%s\n' "$DOCKER_DF" | while IFS="$TAB" read -r type size reclaimable; do
+    [ -n "$type" ] || continue
+    printf '             %s: %s total, %s reclaimable\n' "$type" "$size" "$reclaimable"
+  done
+}
+
+report_review() {
+  echo "Review only (consuela never deletes these; sizes measured on disk):"
+  review_line /Library/Developer/CoreSimulator/Caches/dyld \
+    /Library/Developer/CoreSimulator/Caches/dyld \
+    "simulator runtime dyld cache owned by root; no supported cleanup"
+  review_line "$HOME/Library/Developer/CoreSimulator/Devices" \
+    "$TILDE/Library/Developer/CoreSimulator/Devices" \
+    "available simulators; delete ones you no longer use in Xcode > Devices and Simulators"
+  review_line "$HOME/Library/Developer/Xcode/iOS DeviceSupport" \
+    "$TILDE/Library/Developer/Xcode/iOS DeviceSupport" \
+    "symbols for devices you connected; keep the folder for your current device's iOS version"
+  report_previews_orphans
+  report_shipit
+  report_playwright
+  report_fusion
+  review_line "$HOME/Library/Application Support/Notion/Partitions/notion" \
+    "Notion Partitions" "may hold offline pages; clear it from Notion's settings"
+  review_line "$HOME/Library/Application Support/Spotify/PersistentCache" \
+    "Spotify PersistentCache" "may hold downloads; set the cache limit in Spotify's settings"
+  review_line "$HOME/Library/Caches/com.spotify.client" \
+    "$TILDE/Library/Caches/com.spotify.client" "may hold downloads; clear it from Spotify's settings"
+  review_line "$HOME/Library/Application Support/Linear/Cache" \
+    "Linear Cache" "app cache; quit Linear before any manual cleanup"
+  review_line "$HOME/Library/Application Support/Linear/Code Cache" \
+    "Linear Code Cache" "app cache; quit Linear before any manual cleanup"
+  review_line "$HOME/Library/Application Support/BambuStudio/log" \
+    "BambuStudio logs" "app logs; check dates before deleting any by hand"
+  review_line "$HOME/Library/Caches/pypoetry/virtualenvs" \
+    "Poetry virtualenvs" "project environments; --cache keeps them"
+  report_docker_disk
+}
+
+# Read-only: scans every group and prints sizes. Never runs run_plan.
+run_report() {
+  echo "Storage report. Read-only: nothing is deleted, with or without -y."
+  echo "Scanning..."
+  scan_xcode
+  scan_xcode_previews
+  scan_xcodebuildmcp
+  scan_cache
+  scan_docker
+
+  defaults="xcode cache docker"
+  optin="xcode-previews xcodebuildmcp"
+  echo
+  echo "Cleanup targets (size measured on disk; ~ = estimated reclaimable; ? = unknown):"
+  if [ "$PLAN_COUNT" -eq 0 ]; then
+    echo "  none"
+  else
+    print_plan "$(($(sum_plan_kb estimate) + $(count_plan unknown)))" flag
+  fi
+  echo
+  printf 'Default run (consuela with no flags): %s\n' "$(fmt_run_total \
+    "$(sum_plan_kb firm "$defaults")" "$(sum_plan_kb estimate "$defaults")" \
+    "$(count_plan unknown "$defaults")")"
+  printf 'Opt-in flags together:                %s\n' "$(fmt_run_total \
+    "$(sum_plan_kb firm "$optin")" "$(sum_plan_kb estimate "$optin")" \
+    "$(count_plan unknown "$optin")")"
+  echo
+  if [ -n "$DOCKER_SHOW_VOLUMES" ]; then
+    print_docker_volumes
+    echo
+  fi
+  echo "Measuring review-only paths. Large folders can take a minute..."
+  report_review
+  echo
+  echo "Report only: nothing deleted."
+}
+
 consuela_main() {
   if [ "$(uname -s)" != "Darwin" ]; then
     echo "consuela only runs on macOS." >&2
@@ -723,11 +1494,13 @@ consuela_main() {
   DO_XCODE=0
   DO_CACHE=0
   DO_DOCKER=0
+  DO_PREVIEWS=0
+  DO_MCP=0
   DOCKER_MODE=all
-  DOCKER_TARGET=
   ANY_GROUP=0
   YES=0
   DRY_RUN=0
+  REPORT=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -735,8 +1508,23 @@ consuela_main() {
       --cache|--caches) DO_CACHE=1; ANY_GROUP=1 ;;
       --docker|--docker-all) DO_DOCKER=1; ANY_GROUP=1; DOCKER_MODE=all ;;
       --docker-dangling) DO_DOCKER=1; ANY_GROUP=1; DOCKER_MODE=dangling ;;
+      --xcode-previews) DO_PREVIEWS=1; ANY_GROUP=1 ;;
+      --xcodebuildmcp) DO_MCP=1; ANY_GROUP=1 ;;
+      --docker-volume)
+        if [ $# -lt 2 ] || ! valid_volume_name "$2"; then
+          echo "error: --docker-volume needs a volume name" >&2
+          usage >&2
+          exit 1
+        fi
+        if ! printf '%s' "$DOCKER_VOLUMES" | grep -qxF -- "$2"; then
+          DOCKER_VOLUMES="$DOCKER_VOLUMES$2$NL"
+        fi
+        ANY_GROUP=1
+        shift
+        ;;
       -y|--yes) YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
+      --report) REPORT=1 ;;
       --update) UPDATE=1 ;;
       -h|--help)
         usage
@@ -761,6 +1549,12 @@ consuela_main() {
     exit 0
   fi
 
+  if [ "$REPORT" -eq 1 ] && [ "$ANY_GROUP" -eq 1 ]; then
+    echo "error: --report scans every group; it takes no group flags" >&2
+    usage >&2
+    exit 1
+  fi
+
   if [ "$ANY_GROUP" -eq 0 ]; then
     DO_XCODE=1
     DO_CACHE=1
@@ -769,14 +1563,32 @@ consuela_main() {
 
   # Project config in the caller's directory must not redirect cache commands.
   cd -- "$HOME_REAL"
+  # Path lookups must not leave files behind: python3 bytecode caches in
+  # ~/Library, npm debug logs and update checks in ~/.npm.
+  PYTHONDONTWRITEBYTECODE=1
+  npm_config_logs_max=0
+  npm_config_update_notifier=false
+  export PYTHONDONTWRITEBYTECODE npm_config_logs_max npm_config_update_notifier
 
   plan_init
   trap 'rm -rf "$PLAN_DIR"' EXIT
+
+  if [ "$REPORT" -eq 1 ]; then
+    YES=0
+    run_report
+    exit 0
+  fi
 
   echo "Scanning..."
 
   if [ "$DO_XCODE" -eq 1 ]; then
     scan_xcode
+  fi
+  if [ "$DO_PREVIEWS" -eq 1 ]; then
+    scan_xcode_previews
+  fi
+  if [ "$DO_MCP" -eq 1 ]; then
+    scan_xcodebuildmcp
   fi
   if [ "$DO_CACHE" -eq 1 ]; then
     scan_cache
@@ -784,28 +1596,40 @@ consuela_main() {
   if [ "$DO_DOCKER" -eq 1 ]; then
     scan_docker
   fi
+  if [ -n "$DOCKER_VOLUMES" ]; then
+    scan_docker_volumes
+  fi
 
   firm_kb=$(sum_plan_kb firm)
   estimate_kb=$(sum_plan_kb estimate)
-  run_kb=$((firm_kb + estimate_kb))
+  unknown_n=$(count_plan unknown)
 
   echo
-  printf 'This run:   %s\n' "$(fmt_run_total "$firm_kb" "$estimate_kb")"
+  printf 'This run:   %s\n' "$(fmt_run_total "$firm_kb" "$estimate_kb" "$unknown_n")"
 
-  if [ "$run_kb" -le 0 ]; then
+  if [ "$PLAN_COUNT" -eq 0 ]; then
     echo
+    if [ -n "$DOCKER_SHOW_VOLUMES" ]; then
+      print_docker_volumes
+      echo
+    fi
     echo "Nothing to clean."
     exit 0
   fi
 
   echo
-  print_plan "$estimate_kb"
+  print_plan "$((estimate_kb + unknown_n))"
   echo
+
+  if [ -n "$DOCKER_SHOW_VOLUMES" ]; then
+    print_docker_volumes
+    echo
+  fi
 
   need_confirm=$((1 - YES))
 
   xcode_guard=
-  if plan_has_group xcode; then
+  if plan_has_xcode; then
     if ! xcode_tools=$(running_xcode_tools); then
       xcode_guard="Xcode tool check failed"
       echo "$xcode_guard. Make sure Xcode, Simulator, booted simulators, and xcodebuild are stopped."
@@ -822,6 +1646,9 @@ consuela_main() {
 
   if [ -n "$DOCKER_TARGET" ]; then
     echo "Docker endpoint: $DOCKER_TARGET"
+  fi
+  if plan_has_group docker-volume; then
+    echo "Each Docker volume asks for its name before it is deleted, even with -y."
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -858,6 +1685,17 @@ consuela_main() {
 
 FAIL_COUNT=0
 STEP=
+DOCKER_CTX=
+DOCKER_ENDPOINT=
+DOCKER_CTX_STATE=
+DOCKER_DF=
+DOCKER_TARGET=
+DOCKER_VOLUMES=
+DOCKER_VOLUMES_STATE=
+DOCKER_VOLUME_ROWS=
+DOCKER_SHOW_VOLUMES=
+YES=0
+DOCKER_MODE=all
 init_safety
 
 # Sourced by tests: return. Executed: run main. SC2317 is a false positive.
