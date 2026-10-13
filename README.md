@@ -4,7 +4,7 @@
   <img src="https://static.wikia.nocookie.net/familyguyfanon/images/1/15/Consuela.png/revision/latest/scale-to-width-down/260?cb=20161215031734" alt="Consuela" width="80">
 </p>
 
-consuela is a macOS cleanup script that removes leftover Xcode data and developer caches. It scans the groups you selected, prints how much this run will remove, and asks before it deletes anything.
+consuela is a macOS cleanup script that removes leftover Xcode data and developer caches. It scans the groups you selected, prints how much this run will remove, and asks before it deletes anything. `consuela --report` prints a read-only storage report instead.
 
 The script permanently deletes the data it lists. It asks for confirmation unless you pass `-y`. Do not run it if you need to keep any listed data.
 
@@ -30,7 +30,9 @@ When the plan includes Xcode data, consuela checks for your Xcode, Simulator, bo
 
 **Caches (`--cache`)**
 
-Package-manager caches only. See Cleanup policy for the exact command on each plan line.
+Package-manager caches only: npm, Yarn, pnpm, Bun, pip, uv, Poetry, and Homebrew downloads. See Cleanup policy for the exact command on each plan line.
+
+Poetry: consuela empties `cache` and `artifacts` inside Poetry's cache directory (`poetry config cache-dir`, default `~/Library/Caches/pypoetry`). It keeps `virtualenvs`. If `poetry config virtualenvs.path` points inside `cache` or `artifacts`, consuela skips that folder.
 
 **Docker (`--docker` / `--docker-all`)**
 
@@ -45,7 +47,56 @@ The Docker line is an estimate (`~`). consuela adds the Images, Containers, and 
 
 `--docker` removes all of those. `--docker-dangling` keeps tagged images and some build cache, so it usually frees less than the estimate.
 
+Build cache and images can share layers, so consuela adds the reclaimable column only. It never adds the image total to the build cache total.
+
+After the plan, `--docker` lists every Docker volume with its size and how many containers use it. Volumes are never part of `--docker`, and their sizes are not in "This run".
+
 consuela resolves the Docker context once, the same way the `docker` command does. The lookup follows `DOCKER_HOST`, `DOCKER_CONTEXT`, and `docker context use`. The scan and the prune both use that context, and the plan shows its endpoint. Any `unix://` socket counts as local. With `-y`, consuela skips Docker cleanup when the endpoint is not a `unix://` socket or cannot be read. Run consuela without `-y` to confirm a remote cleanup at the prompt.
+
+## Opt-in targets
+
+These flags are never part of a run without flags. Name them to include them. A run with only opt-in flags scans only those targets.
+
+| Flag | Removes | Keeps |
+| --- | --- | --- |
+| `--xcode-previews` | Xcode Previews simulators, with `xcrun simctl --set "~/Library/Developer/Xcode/UserData/Previews/Simulator Devices" delete all` | the rest of `Xcode/UserData`, and `Simulator%20Devices` |
+| `--xcodebuildmcp` | in `~/Library/Developer/XcodeBuildMCP/workspaces/*`: the contents of `DerivedData`, and finished `test-products/*.xctestproducts` with their completion markers | `state`, `locks`, `logs`, `result-bundles`, other files, and whole workspaces that hold a lock |
+| `--docker-volume NAME` | one named Docker volume, with `docker volume rm NAME` | every volume you did not name |
+
+**Xcode Previews.** simctl deletes only registered devices, the folders with a `device.plist`. Folders without one stay. consuela never deletes `Xcode/UserData` itself. The Xcode check described above also covers this flag.
+
+**XcodeBuildMCP.** For test products, consuela uses the same protection rule as XcodeBuildMCP's own `purge` command. The other rules are stricter:
+
+- A `DerivedData` folder qualifies only when every entry is a project folder with an `info.plist` or a `*.noindex` folder. One unknown entry or symlink skips the whole folder.
+- A test products folder qualifies only when its name matches `<tool>_<time>_pid<n>_<hex>.xctestproducts`, and either its `.xcodebuildmcp-completed` marker exists or the owning process has exited.
+- A workspace with anything in `locks`, or an unreadable `locks` folder, is skipped.
+
+consuela checks these rules again right before it deletes. When `XcodeBuildMCP` runs, consuela lists it with the Xcode tools and asks even with `-y`.
+
+**ShipIt folders are never deleted.** Electron apps stage updates in `~/Library/Caches/<id>.ShipIt`. `ShipItState.plist` is JSON, and its `updateBundleURL` names the pending update. Cursor, for example, can hold a pending update that it installs on the next quit. `--report` lists these folders with the pending update and whether the updater runs.
+
+**Docker volumes.** `--docker-volume NAME` deletes only the volumes you name. Repeat the flag for more. consuela never picks a volume from its name, age, size, or link count. It refuses a volume when:
+
+- the volume does not exist,
+- any container uses it, running or stopped,
+- Docker cannot tell whether a container uses it,
+- the endpoint is not a local `unix://` socket.
+
+Each volume asks you to type its name at a terminal. This happens even with `-y`, and the run fails without a terminal. Right before `docker volume rm`, consuela checks again that the pinned context points to the same endpoint and that no container uses the volume. `--docker-volume` does not run `--docker` or any other group. consuela never runs `docker volume prune` or `docker system prune --volumes`.
+
+## Storage report
+
+```sh
+consuela --report
+```
+
+`--report` scans every group and every opt-in target, prints sizes, and exits. It never deletes, with or without `-y`, and takes no group flags. It takes about a minute on a large disk. The report has three parts:
+
+- **Cleanup targets**: each plan line with the flag that selects it. Sizes are measured on disk. `~` marks an estimate of what the command frees, and `?` an unknown size. Totals show the run without flags and the opt-in flags separately.
+- **Docker volumes**: name, size, and how many containers use each one.
+- **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, and `docker system df`. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
+
+The report checks fixed paths only. It does not search the whole disk.
 
 ## Install
 
@@ -92,11 +143,14 @@ consuela --docker
 consuela --docker-dangling
 consuela --xcode --cache
 consuela --dry-run --cache
+consuela --dry-run --xcode-previews --xcodebuildmcp
+consuela --docker-volume my-volume
+consuela --report
 ```
 
 With group flags, consuela scans only those groups.
 
-consuela exits 0 after a dry run, when nothing needs cleaning, or when every step succeeds. It exits 1 for a usage error, a declined prompt, a failed step, or when it cannot start, for example outside macOS. When a step fails, consuela runs the remaining steps and lists the failed ones on stderr. If consuela cannot scan something, such as Docker with the daemon stopped, it prints a warning and skips it. The exit status does not change.
+consuela exits 0 after a dry run or report, when nothing needs cleaning, or when every step succeeds. It exits 1 for a usage error, a declined prompt, a failed step, or when it cannot start, for example outside macOS. When a step fails, consuela runs the remaining steps and lists the failed ones on stderr. If consuela cannot scan something, such as Docker with the daemon stopped, it prints a warning and skips it. The exit status does not change.
 
 Disk Utility may still report the old free space until Time Machine local snapshots expire. The delay is not a failed cleanup.
 
@@ -108,13 +162,16 @@ Each plan line names the operation that will run. A `~` before a size marks an e
 - **Allowlist**: consuela resolves symlinks before it wipes a directory or deletes XCTestDevices. The resolved path must match one of these entries:
   - Inside only: `~/Library/Caches`, `~/.cache`
   - The directory itself or inside: `~/Library/Developer/Xcode/DerivedData`, `~/Library/Developer/CoreSimulator/Caches`, `~/Library/Developer/XCTestDevices`, `~/Library/Logs/CoreSimulator`, `~/.npm`, `~/.bun/install/cache`, `~/.yarn/cache`
+  - Exactly this directory: `~/Library/Developer/Xcode/UserData/Previews/Simulator Devices`, and `~/Library/Developer/XcodeBuildMCP/workspaces/<one name>/DerivedData`
   - Any other path is skipped with a warning during the scan. `/` and `$HOME` are never allowed.
+  - Test products are checked against their exact parent folder, and refused when they are symlinks.
+- **No double counting**: when two plan lines would cover the same folder, or one inside the other, the later one skips it with a warning.
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).
 - **pnpm**: `pnpm store prune` only. That removes packages no project references. It does not delete the store directory. The size shown is the whole store, marked `~` as an estimate. If pnpm is not installed, consuela leaves the store alone.
 - **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay. A custom `brew --cache` outside the allowlist is skipped.
 - **Docker**: `docker system prune -af` for `--docker` / `--docker-all`, or `docker system prune -f` for `--docker-dangling`. Neither command removes volumes.
 
-npm, Yarn, pnpm, pip, and uv commands run from your home directory. Config files in the current directory, such as `.npmrc` or `.yarnrc.yml`, do not change what gets cleaned. Config in your home directory and environment variables such as `UV_CACHE_DIR` still apply. These commands use your global tool versions.
+npm, Yarn, pnpm, pip, uv, and Poetry commands run from your home directory. consuela sets `npm_config_logs_max=0`, `npm_config_update_notifier=false`, and `PYTHONDONTWRITEBYTECODE=1`, so scans leave no npm logs or Python bytecode behind. Config files in the current directory, such as `.npmrc` or `.yarnrc.yml`, do not change what gets cleaned. Config in your home directory and environment variables such as `UV_CACHE_DIR` still apply. These commands use your global tool versions.
 
 ## Contributing
 
