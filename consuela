@@ -1058,7 +1058,7 @@ scan_docker_volumes() {
     label="Docker volume $name (docker volume rm; type the name to confirm)"
     arg="$DOCKER_CTX$TAB$DOCKER_ENDPOINT$TAB$name"
     case "$kb" in
-      ''|*[!0-9]*) add docker-volume 0 "$label" docker_volume "$arg" unknown ;;
+      ''|*[!0-9]*|0) add docker-volume 0 "$label" docker_volume "$arg" unknown ;;
       *) add_estimate docker-volume "$kb" "$label" docker_volume "$arg" ;;
     esac
     DOCKER_TARGET="$DOCKER_ENDPOINT (context $DOCKER_CTX)"
