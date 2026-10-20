@@ -710,6 +710,38 @@ ok "failed simctl step exits 1" '[ "$ST" -eq 1 ] && contains "$ERR" "failed: XCT
 run --update --dry-run
 ok "--update rejects other arguments" '[ "$ST" -eq 1 ] && contains "$ERR" "--update must be the only argument"'
 
+echo "== version and Homebrew installs"
+run --version
+ok "--version prints the version" '[ "$ST" -eq 0 ] && [ "$OUT" = "consuela $(sed -n "s/^VERSION=//p" "$ROOT/consuela")" ]'
+run --version --dry-run
+ok "--version rejects other arguments" '[ "$ST" -eq 1 ] && contains "$ERR" "--version must be the only argument"'
+setup
+stub curl <<'EOF'
+#!/bin/sh
+echo called >>"$CONSUELA_TEST_STATE/curl"
+exit 1
+EOF
+mkdir -p "$T/cellar/bin"
+sed 's/^INSTALL_METHOD=script$/INSTALL_METHOD=brew/' "$ROOT/consuela" >"$T/cellar/bin/consuela"
+chmod +x "$T/cellar/bin/consuela"
+ln -s "$T/cellar/bin/consuela" "$T/bin/consuela"
+brew_before=$(cksum <"$T/cellar/bin/consuela")
+env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin" LANG=C CONSUELA_TEST_STATE="$S" \
+  consuela --update >"$S/out" 2>"$S/err"
+ST=$?
+OUT=$(cat "$S/out")
+check "brew --update exits 0 ($ST: $(cat "$S/err"))" [ "$ST" -eq 0 ]
+check "brew --update points to brew upgrade" contains "$OUT" "brew upgrade consuela"
+check "brew --update leaves the install alone" [ "$brew_before" = "$(cksum <"$T/cellar/bin/consuela")" ]
+check "brew --update downloads nothing" [ ! -e "$S/curl" ]
+rm "$T/bin/consuela"
+cp "$ROOT/consuela" "$T/bin/consuela"
+env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin" LANG=C CONSUELA_TEST_STATE="$S" \
+  consuela --update >"$S/out" 2>"$S/err"
+ST=$?
+check "script --update downloads the installer" [ -e "$S/curl" ]
+check "failed download fails the update" [ "$ST" -eq 1 ]
+
 echo
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

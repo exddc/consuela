@@ -100,15 +100,31 @@ The report checks fixed paths only. It does not search the whole disk.
 
 ## Install
 
-Run the installer:
+Install with Homebrew:
+
+```sh
+brew install exddc/tap/consuela
+```
+
+Or run the installer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/exddc/consuela/main/install.sh | sh
 ```
 
+Homebrew installs the latest release. The installer installs the latest commit on `main`, which can be newer than the version `consuela --version` prints.
+
 ## Update
 
-Replace your installed consuela with the latest version from GitHub:
+If you installed with Homebrew, update with Homebrew:
+
+```sh
+brew upgrade consuela
+```
+
+On a Homebrew install, `consuela --update` prints that command and changes nothing.
+
+If you used the installer, replace your installed consuela with the latest version from GitHub:
 
 ```sh
 consuela --update
