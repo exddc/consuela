@@ -15,6 +15,7 @@ usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling
                 [--docker-volume NAME]... [-y] [--dry-run]
        consuela --report [-y]
        consuela --update
+       consuela --version
 
 With no group flags, scans and cleans --xcode, --cache, and --docker after
 confirmation. The other flags are opt-in and never part of a default run.
@@ -51,21 +52,30 @@ Opt-in:
                       flag, Docker volumes, and data to review by hand.
                       Never deletes, even with -y
   --update            replace this consuela file with the latest version
-                      from GitHub; must be the only argument
+                      from GitHub, or print the Homebrew command on a
+                      Homebrew install; must be the only argument
+  --version           print the version; must be the only argument
 
 Exits 0 after a dry run or report, when nothing needs cleaning, when every
-step succeeds, or after an update. Exits 1 for a usage error, a declined
-prompt, a failed step, a failed update, or when consuela cannot start.
+step succeeds, after --version, or after an update. Exits 1 for a usage
+error, a declined prompt, a failed step, a failed update, or when consuela
+cannot start.
 Failed steps are listed on stderr. Anything that cannot be scanned, such
 as Docker with the daemon stopped, prints a warning and is skipped
 without changing the exit status.
 EOF
 }
 
+VERSION=0.1.0
+INSTALL_METHOD=script
 INSTALLER_URL="https://raw.githubusercontent.com/exddc/consuela/main/install.sh"
 
 # Installs the latest consuela into the directory of $1.
 self_update() {
+  if [ "$INSTALL_METHOD" = brew ]; then
+    echo "consuela was installed with Homebrew. To update, run: brew upgrade consuela"
+    return 0
+  fi
   case "$1" in
     */consuela) ;;
     *)
@@ -1491,6 +1501,7 @@ consuela_main() {
 
   ARGC=$#
   UPDATE=0
+  SHOW_VERSION=0
   DO_XCODE=0
   DO_CACHE=0
   DO_DOCKER=0
@@ -1526,6 +1537,7 @@ consuela_main() {
       --dry-run) DRY_RUN=1 ;;
       --report) REPORT=1 ;;
       --update) UPDATE=1 ;;
+      --version) SHOW_VERSION=1 ;;
       -h|--help)
         usage
         exit 0
@@ -1538,6 +1550,16 @@ consuela_main() {
     esac
     shift
   done
+
+  if [ "$SHOW_VERSION" -eq 1 ]; then
+    if [ "$ARGC" -ne 1 ]; then
+      echo "error: --version must be the only argument" >&2
+      usage >&2
+      exit 1
+    fi
+    echo "consuela $VERSION"
+    exit 0
+  fi
 
   if [ "$UPDATE" -eq 1 ]; then
     if [ "$ARGC" -ne 1 ]; then
