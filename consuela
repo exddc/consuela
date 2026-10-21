@@ -25,7 +25,7 @@ Any group flag limits the run to the groups you name.
                       (skipped when consuela finds more than one Xcode),
                       DerivedData, CoreSimulator caches, simulator logs,
                       xcodebuild cache, SwiftPM cache, CocoaPods cache
-  --cache             npm, Yarn, pnpm, Bun, pip, uv, Poetry (cache and
+  --cache             npm, npx, Yarn, pnpm, Bun, pip, uv, Poetry (cache and
                       artifacts; virtualenvs kept), Homebrew download cache
   --docker            unused images (including tagged), containers, build
                       cache; volumes kept. Same as --docker-all
@@ -859,8 +859,9 @@ poetry_paths() {
 scan_cache() {
   npm_cache=$(cache_path_or_default "$HOME/.npm" npm config get cache)
   if have npm; then
-    claim_paths "$npm_cache"
+    claim_paths "$npm_cache/_cacache"
     add cache "$(claimed_kb)" "npm cache clean --force" npm_clean "$npm_cache"
+    add_clear cache "npx package cache" "$npm_cache/_npx"
   else
     add_clear cache "npm cache directory" "$npm_cache"
   fi

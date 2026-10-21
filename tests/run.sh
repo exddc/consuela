@@ -613,10 +613,23 @@ ok "-y skips an unknown endpoint" 'contains "$ERR" "docker endpoint unknown" && 
 echo "== totals and overlap"
 setup
 stub_npm
-echo "$C/pypoetry" >"$S/npm_cache"
+echo "$C/pypoetry/cache" >"$S/npm_cache"
 run --dry-run --cache
-check "overlapping cache paths warned" contains "$ERR" "overlaps $C/pypoetry"
-check "Poetry line dropped when npm already counts it" lacks "$OUT" "Poetry cache"
+check "overlapping cache paths warned" contains "$ERR" "skipping $C/pypoetry/cache: overlaps $C/pypoetry/cache/"
+
+echo "== npm and npx"
+setup
+stub_npm
+echo "$H/.npm" >"$S/npm_cache"
+mkfile_kb "$H/.npm/_npx/0a1b/node_modules/pkg/index.js" 300
+mkfile_kb "$H/.npm/_logs/debug.log" 200
+run --dry-run --cache
+check "npm line counts only _cacache" contains "$OUT" "16K  npm cache clean --force"
+check "npx cache planned separately" contains "$OUT" "300K  npx package cache"
+run -y --cache
+check "npm cache clean ran" contains "$(mutations)" "npm cache clean --force"
+check "npx cache emptied" [ -z "$(ls -A "$H/.npm/_npx")" ]
+check "npm logs kept" [ -f "$H/.npm/_logs/debug.log" ]
 
 echo "== unsafe paths"
 setup

@@ -30,7 +30,7 @@ When the plan includes Xcode data, consuela checks for your Xcode, Simulator, bo
 
 **Caches (`--cache`)**
 
-Package-manager caches only: npm, Yarn, pnpm, Bun, pip, uv, Poetry, and Homebrew downloads. See Cleanup policy for the exact command on each plan line.
+Package-manager caches only: npm, npx, Yarn, pnpm, Bun, pip, uv, Poetry, and Homebrew downloads. See Cleanup policy for the exact command on each plan line.
 
 Poetry: consuela empties `cache` and `artifacts` inside Poetry's cache directory (`poetry config cache-dir`, default `~/Library/Caches/pypoetry`). It keeps `virtualenvs`. If `poetry config virtualenvs.path` points inside `cache` or `artifacts`, consuela skips that folder.
 
@@ -183,6 +183,7 @@ Each plan line names the operation that will run. A `~` before a size marks an e
   - Test products are checked against their exact parent folder, and refused when they are symlinks.
 - **No double counting**: when two plan lines would cover the same folder, or one inside the other, the later one skips it with a warning.
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).
+- **npx**: `npm cache clean --force` empties only `_cacache`, so consuela also wipes the contents of `_npx` in npm's cache directory. npx downloads a package again the next time you run it. The npm line counts `_cacache` only.
 - **pnpm**: `pnpm store prune` only. That removes packages no project references. It does not delete the store directory. The size shown is the whole store, marked `~` as an estimate. If pnpm is not installed, consuela leaves the store alone.
 - **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay. A custom `brew --cache` outside the allowlist is skipped.
 - **Docker**: `docker system prune -af` for `--docker` / `--docker-all`, or `docker system prune -f` for `--docker-dangling`. Neither command removes volumes.
