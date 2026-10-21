@@ -26,7 +26,9 @@ Any group flag limits the run to the groups you name.
                       DerivedData, CoreSimulator caches, simulator logs,
                       xcodebuild cache, SwiftPM cache, CocoaPods cache
   --cache             npm, npx, Yarn, pnpm, Bun, pip, uv, Poetry (cache and
-                      artifacts; virtualenvs kept), Homebrew download cache
+                      artifacts; virtualenvs kept), Homebrew download cache,
+                      brew cleanup, TypeScript, node-gyp, Corepack, Next.js
+                      SWC, Prisma, Electron, and Deno caches
   --docker            unused images (including tagged), containers, build
                       cache; volumes kept. Same as --docker-all
   --docker-all        same as --docker
@@ -278,6 +280,23 @@ $1
 EOF
 }
 
+# Prints the paths in $1 whose top-level entries the current user owns.
+# Warns about the rest: rm cannot delete another user's folders.
+owned_paths() {
+  uid=$(id -u)
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    foreign=$(find -H "$p" -mindepth 1 -maxdepth 1 ! -user "$uid" 2>/dev/null | sed -n '1p')
+    if [ -n "$foreign" ]; then
+      warn "skipping $p: $foreign is owned by $(stat -f %Su "$foreign" 2>/dev/null || echo another user); remove it with sudo rm -rf"
+    else
+      printf '%s\n' "$p"
+    fi
+  done <<EOF
+$1
+EOF
+}
+
 # Remove directory contents, keep the directory.
 # Refuses paths outside the allowlist.
 clear_dir() {
@@ -374,7 +393,7 @@ claimed_kb() {
 
 # Usage: add_clear <group> <label> <newline-separated paths> [action]
 add_clear() {
-  claim_paths "$(allowed_paths "$3")"
+  claim_paths "$(owned_paths "$(allowed_paths "$3")")"
   paths=${CLAIMED_PATHS%"$NL"}
   add "$1" "$(printf '%s\n' "$paths" | paths_du_kb)" "$2" "${4:-clear_dir}" "$paths"
 }
@@ -856,6 +875,28 @@ poetry_paths() {
   done
 }
 
+# Usage: brew_cleanup_kb <brew cache>. Sums the sizes `brew cleanup -n` lists
+# outside the download cache, which its own plan line already counts.
+brew_cleanup_kb() {
+  brew cleanup -n 2>/dev/null | awk -v cache="$1/" '
+    /^Would remove: / {
+      line = substr($0, 15)
+      if (index(line, cache) == 1 || line !~ / \([^()]*\)$/) next
+      n = split(line, parts, " ")
+      size = parts[n]
+      gsub(/[()]/, "", size)
+      if (match(size, /^[0-9.]+/) == 0) next
+      v = substr(size, 1, RLENGTH)
+      u = substr(size, RLENGTH + 1)
+      if (u == "B") kb += v / 1024
+      else if (u == "KB") kb += v
+      else if (u == "MB") kb += v * 1024
+      else if (u == "GB") kb += v * 1048576
+      else if (u == "TB") kb += v * 1073741824
+    }
+    END { printf "%d\n", kb }'
+}
+
 scan_cache() {
   npm_cache=$(cache_path_or_default "$HOME/.npm" npm config get cache)
   if have npm; then
@@ -913,6 +954,19 @@ scan_cache() {
 
   brew_cache=$(cache_path_or_default "$HOME/Library/Caches/Homebrew" brew --cache)
   add_clear cache "Homebrew download cache" "$brew_cache"
+  if have brew; then
+    add_estimate cache "$(brew_cleanup_kb "$brew_cache")" \
+      "brew cleanup (old versions, stale files)" brew_cleanup
+  fi
+
+  add_clear cache "TypeScript typings cache" "$HOME/Library/Caches/typescript"
+  add_clear cache "node-gyp headers" "$HOME/Library/Caches/node-gyp$NL$HOME/.cache/node-gyp"
+  add_clear cache "Corepack package managers" "$HOME/.cache/node/corepack"
+  add_clear cache "pnpm metadata cache" "$HOME/Library/Caches/pnpm"
+  add_clear cache "Next.js SWC binaries" "$HOME/Library/Caches/next-swc"
+  add_clear cache "Prisma engines" "$HOME/.cache/prisma"
+  add_clear cache "Electron downloads" "$HOME/Library/Caches/electron$NL$HOME/Library/Caches/electron-builder"
+  add_clear cache "Deno cache" "$HOME/Library/Caches/deno"
 }
 
 # Docker reports sizes in decimal units, for example 6.844GB or 0B (0%).
@@ -1253,6 +1307,9 @@ run_action() {
       else
         run_ok yarn cache clean
       fi
+      ;;
+    brew_cleanup)
+      run_ok brew cleanup
       ;;
     pnpm_prune)
       run_ok pnpm store prune

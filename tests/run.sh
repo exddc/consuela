@@ -208,6 +208,7 @@ S=$CONSUELA_TEST_STATE
 echo "brew $*" >>"$S/calls"
 case "$*" in
   --cache) cat "$S/brew_cache" ;;
+  "cleanup -n") cat "$S/brew_cleanup" 2>/dev/null ;;
   *) echo "brew $*" >>"$S/mutations" ;;
 esac
 EOF
@@ -630,6 +631,48 @@ run -y --cache
 check "npm cache clean ran" contains "$(mutations)" "npm cache clean --force"
 check "npx cache emptied" [ -z "$(ls -A "$H/.npm/_npx")" ]
 check "npm logs kept" [ -f "$H/.npm/_logs/debug.log" ]
+
+echo "== Homebrew cleanup and Node caches"
+setup
+stub_brew
+echo "$C/Homebrew" >"$S/brew_cache"
+cat >"$S/brew_cleanup" <<EOF
+Would remove: $C/Homebrew/downloads/abc--old.bottle.tar.gz (5MB)
+Would remove: /opt/homebrew/Cellar/node/20.1.0 (2,150 files, 1.5MB)
+Would remove: /opt/homebrew/var/homebrew/tmp/.caskroom/app with space (512KB)
+Would remove: $H/Library/Logs/Homebrew/node (64B)
+Would remove (empty directory): /opt/homebrew/lib/gio
+==> This operation would free approximately 7MB of disk space.
+EOF
+mkfile_kb "$C/typescript/5.9/node_modules/@types/node/index.d.ts" 40
+mkfile_kb "$C/node-gyp/22.0.0/include/node/node.h" 24
+mkfile_kb "$H/.cache/prisma/master/engine" 32
+mkfile_kb "$H/.cache/node/corepack/v1/pnpm/9.0.0/bin" 8
+run --dry-run --cache
+check "brew cleanup estimate skips the download cache" contains "$OUT" "~    2.0M  brew cleanup (old versions, stale files)"
+check "TypeScript cache planned" contains "$OUT" "40K  TypeScript typings cache"
+check "node-gyp headers planned" contains "$OUT" "24K  node-gyp headers"
+check "Prisma engines planned" contains "$OUT" "32K  Prisma engines"
+check "Corepack planned" contains "$OUT" "8K  Corepack package managers"
+check "missing caches not planned" lacks "$OUT" "Deno cache"
+run -y --cache
+check "brew cleanup ran" contains "$(mutations)" "brew cleanup"
+ok "Node caches emptied" '[ -z "$(find "$C/typescript" "$C/node-gyp" "$H/.cache/prisma" -mindepth 1)" ]'
+check "Node cache folders kept" [ -d "$C/typescript" ]
+setup
+stub_brew
+echo "$C/Homebrew" >"$S/brew_cache"
+run --dry-run --cache
+check "nothing for brew cleanup means no line" lacks "$OUT" "brew cleanup"
+setup
+mkfile_kb "$C/node-gyp/20.6.1/include/node/node.h" 24
+stub id <<'EOF'
+#!/bin/sh
+echo 99999
+EOF
+run --dry-run --cache
+check "folder owned by another user skipped" contains "$ERR" "skipping $C/node-gyp: $C/node-gyp/20.6.1 is owned by"
+check "skipped folder not planned" lacks "$OUT" "node-gyp headers"
 
 echo "== unsafe paths"
 setup
