@@ -30,7 +30,13 @@ When the plan includes Xcode data, consuela checks for your Xcode, Simulator, bo
 
 **Caches (`--cache`)**
 
-Package-manager caches only: npm, npx, Yarn, pnpm, Bun, pip, uv, Poetry, and Homebrew downloads. See Cleanup policy for the exact command on each plan line.
+Package-manager and tool caches that refill on demand:
+
+- npm, npx, Yarn, pnpm, Bun, pip, uv, and Poetry caches
+- Homebrew downloads, plus `brew cleanup` for old formula versions and stale files
+- TypeScript typings (`~/Library/Caches/typescript`), node-gyp headers, Corepack package managers, pnpm metadata, Next.js SWC binaries, Prisma engines, Electron downloads, and the Deno cache
+
+See Cleanup policy for the exact command on each plan line.
 
 Poetry: consuela empties `cache` and `artifacts` inside Poetry's cache directory (`poetry config cache-dir`, default `~/Library/Caches/pypoetry`). It keeps `virtualenvs`. If `poetry config virtualenvs.path` points inside `cache` or `artifacts`, consuela skips that folder.
 
@@ -185,7 +191,8 @@ Each plan line names the operation that will run. A `~` before a size marks an e
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).
 - **npx**: `npm cache clean --force` empties only `_cacache`, so consuela also wipes the contents of `_npx` in npm's cache directory. npx downloads a package again the next time you run it. The npm line counts `_cacache` only.
 - **pnpm**: `pnpm store prune` only. That removes packages no project references. It does not delete the store directory. The size shown is the whole store, marked `~` as an estimate. If pnpm is not installed, consuela leaves the store alone.
-- **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). This is not `brew cleanup --prune=all`; old installed formula versions stay. A custom `brew --cache` outside the allowlist is skipped.
+- **Homebrew**: delete the contents of `brew --cache` (downloaded bottles and source archives). A custom `brew --cache` outside the allowlist is skipped. Then run `brew cleanup`, which removes old installed formula versions, cask staging folders, old portable Ruby versions, and Homebrew logs. Its size comes from `brew cleanup -n`, without the paths inside `brew --cache`, and is marked `~`. The line appears only when brew is installed.
+- **Node and tool caches**: wipe the contents of `~/Library/Caches/typescript`, `~/Library/Caches/node-gyp`, `~/.cache/node-gyp`, `~/.cache/node/corepack`, `~/Library/Caches/pnpm`, `~/Library/Caches/next-swc`, `~/.cache/prisma`, `~/Library/Caches/electron`, `~/Library/Caches/electron-builder`, and `~/Library/Caches/deno`. Each tool downloads what it needs again, so the first install or build afterwards needs a network connection.
 - **Docker**: `docker system prune -af` for `--docker` / `--docker-all`, or `docker system prune -f` for `--docker-dangling`. Neither command removes volumes.
 
 npm, Yarn, pnpm, pip, uv, and Poetry commands run from your home directory. consuela sets `npm_config_logs_max=0`, `npm_config_update_notifier=false`, and `PYTHONDONTWRITEBYTECODE=1`, so scans leave no npm logs or Python bytecode behind. Config files in the current directory, such as `.npmrc` or `.yarnrc.yml`, do not change what gets cleaned. Config in your home directory and environment variables such as `UV_CACHE_DIR` still apply. These commands use your global tool versions.
