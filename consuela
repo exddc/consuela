@@ -280,6 +280,23 @@ $1
 EOF
 }
 
+# Prints the paths in $1 whose top-level entries the current user owns.
+# Warns about the rest: rm cannot delete another user's folders.
+owned_paths() {
+  uid=$(id -u)
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    foreign=$(find -H "$p" -mindepth 1 -maxdepth 1 ! -user "$uid" 2>/dev/null | sed -n '1p')
+    if [ -n "$foreign" ]; then
+      warn "skipping $p: $foreign is owned by $(stat -f %Su "$foreign" 2>/dev/null || echo another user); remove it with sudo rm -rf"
+    else
+      printf '%s\n' "$p"
+    fi
+  done <<EOF
+$1
+EOF
+}
+
 # Remove directory contents, keep the directory.
 # Refuses paths outside the allowlist.
 clear_dir() {
@@ -376,7 +393,7 @@ claimed_kb() {
 
 # Usage: add_clear <group> <label> <newline-separated paths> [action]
 add_clear() {
-  claim_paths "$(allowed_paths "$3")"
+  claim_paths "$(owned_paths "$(allowed_paths "$3")")"
   paths=${CLAIMED_PATHS%"$NL"}
   add "$1" "$(printf '%s\n' "$paths" | paths_du_kb)" "$2" "${4:-clear_dir}" "$paths"
 }

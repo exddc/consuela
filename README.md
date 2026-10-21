@@ -187,6 +187,7 @@ Each plan line names the operation that will run. A `~` before a size marks an e
   - Exactly this directory: `~/Library/Developer/Xcode/UserData/Previews/Simulator Devices`, and `~/Library/Developer/XcodeBuildMCP/workspaces/<one name>/DerivedData`
   - Any other path is skipped with a warning during the scan. `/` and `$HOME` are never allowed.
   - Test products are checked against their exact parent folder, and refused when they are symlinks.
+- **Ownership**: when a folder to wipe holds a top-level entry that another user owns, such as a root-owned node-gyp folder left by `sudo npm`, consuela skips the whole folder with a warning. `rm` cannot delete it without sudo, and consuela never runs sudo.
 - **No double counting**: when two plan lines would cover the same folder, or one inside the other, the later one skips it with a warning.
 - **npm / Yarn / pip / uv / CocoaPods**: when the tool is installed, run its own cache command (`npm cache clean --force`, `yarn cache clean`, `pip cache purge`, `uv cache clean`, `pod cache clean --all`).
 - **npx**: `npm cache clean --force` empties only `_cacache`, so consuela also wipes the contents of `_npx` in npm's cache directory. npx downloads a package again the next time you run it. The npm line counts `_cacache` only.

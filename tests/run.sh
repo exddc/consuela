@@ -664,6 +664,15 @@ stub_brew
 echo "$C/Homebrew" >"$S/brew_cache"
 run --dry-run --cache
 check "nothing for brew cleanup means no line" lacks "$OUT" "brew cleanup"
+setup
+mkfile_kb "$C/node-gyp/20.6.1/include/node/node.h" 24
+stub id <<'EOF'
+#!/bin/sh
+echo 99999
+EOF
+run --dry-run --cache
+check "folder owned by another user skipped" contains "$ERR" "skipping $C/node-gyp: $C/node-gyp/20.6.1 is owned by"
+check "skipped folder not planned" lacks "$OUT" "node-gyp headers"
 
 echo "== unsafe paths"
 setup
