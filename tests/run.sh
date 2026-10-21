@@ -330,7 +330,7 @@ setup() {
 # Usage: run [consuela args...]. Stdin comes from $STDIN (default /dev/null).
 run() {
   env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=C \
-    CONSUELA_TEST_STATE="$S" \
+    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 \
     CONSUELA_FIXTURE_XCODE_APPS="${XCODE_APPS:-$T/apps/Xcode.app}" \
     CONSUELA_FIXTURE_DEVICES="$S/devices.json" \
     CONSUELA_FIXTURE_RUNTIME_IMAGES="$S/runtime_images.json" \
@@ -353,7 +353,7 @@ run_tty() {
   IFS=$TABSEP
   # shellcheck disable=SC2086
   set -- $answers -- env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=C \
-    CONSUELA_TEST_STATE="$S" \
+    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 \
     CONSUELA_FIXTURE_XCODE_APPS="$T/apps/Xcode.app" CONSUELA_FIXTURE_DEVICES="$S/devices.json" \
     CONSUELA_FIXTURE_RUNTIME_IMAGES="$S/runtime_images.json" CONSUELA_FIXTURE_RUNTIMES="$S/runtimes.json" \
     "$ROOT/consuela" "$@"
@@ -706,6 +706,7 @@ check "yes empties the folder" [ -z "$(ls -A "$H/.cache/bigtool")" ]
 check "yes keeps the folder itself" [ -d "$H/.cache/bigtool" ]
 check "no keeps the other cache" [ -f "$C/OtherApp/data" ]
 check "virtualenvs never offered" [ -f "$C/pypoetry/virtualenvs/big/lib/x" ]
+ok "unknown caches start at 1G by default" '(HOME=$H; . "$ROOT/consuela"; [ "$UNKNOWN_CACHE_MIN_KB" -eq 1048576 ])'
 run --dry-run --xcode
 check "--xcode alone does not scan unknown caches" lacks "$OUT" "Other caches"
 setup

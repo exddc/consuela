@@ -29,7 +29,7 @@ Any group flag limits the run to the groups you name.
                       artifacts; virtualenvs kept), Homebrew download cache,
                       brew cleanup, TypeScript, node-gyp, Corepack, Next.js
                       SWC, Prisma, Electron, and Deno caches. At a
-                      terminal, also asks about each other folder of 100M
+                      terminal, also asks about each other folder of 1G
                       or more in ~/.cache and ~/Library/Caches
   --docker            unused images (including tagged), containers, build
                       cache; volumes kept. Same as --docker-all
@@ -971,7 +971,7 @@ scan_cache() {
   add_clear cache "Deno cache" "$HOME/Library/Caches/deno"
 }
 
-UNKNOWN_CACHE_MIN_KB=102400
+UNKNOWN_CACHE_MIN_KB=${CONSUELA_FIXTURE_UNKNOWN_MIN_KB:-1048576}
 
 # Pending app updates, Apple's caches, and folders the report lists for review.
 unknown_cache_skipped() {
@@ -1002,6 +1002,7 @@ scan_unknown_caches() {
     if unknown_cache_skipped "$d" || overlaps_claimed "$d" || ! path_is_allowed "$d"; then
       continue
     fi
+    [ -n "$(owned_paths "$d")" ] || continue
     kb=$(du_kb "$d")
     [ "$kb" -ge "$UNKNOWN_CACHE_MIN_KB" ] || continue
     UNKNOWN_CACHES="$UNKNOWN_CACHES$kb$TAB$d$NL"
