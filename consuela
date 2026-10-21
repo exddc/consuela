@@ -70,7 +70,7 @@ without changing the exit status.
 EOF
 }
 
-VERSION=0.1.0
+VERSION=0.2.0
 INSTALL_METHOD=script
 INSTALLER_URL="https://raw.githubusercontent.com/exddc/consuela/main/install.sh"
 
