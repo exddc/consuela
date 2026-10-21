@@ -40,6 +40,17 @@ See Cleanup policy for the exact command on each plan line.
 
 Poetry: consuela empties `cache` and `artifacts` inside Poetry's cache directory (`poetry config cache-dir`, default `~/Library/Caches/pypoetry`). It keeps `virtualenvs`. If `poetry config virtualenvs.path` points inside `cache` or `artifacts`, consuela skips that folder.
 
+**Other caches (asked one by one)**
+
+With `--cache`, which includes a run without flags, consuela also looks at each folder directly inside `~/.cache` and `~/Library/Caches`. It lists every folder of 1G or more that no plan line covers, largest first. After the plan runs, it asks about each folder with `Wipe the contents of <folder> (<size>)? [y/N]`. Only `y` wipes it; the folder itself stays. These sizes are not part of "This run".
+
+- It asks only at a terminal. With `-y` or without a terminal, it lists the folders as skipped and deletes none of them. `--dry-run` and `--report` list them.
+- It never offers `*.ShipIt` and `*-updater` folders (pending app updates), `com.apple.*`, `com.spotify.client`, or `ms-playwright`.
+- It never offers a folder that holds or sits inside a path a plan line already covers. For example, `~/Library/Caches/pypoetry` holds Poetry's virtualenvs, so it is never offered.
+- Symlinks, paths outside the allowlist, and folders with entries another user owns are skipped.
+
+The app that wrote a folder downloads or rebuilds what it needs again. Quit the app first if it is running, such as a browser before you wipe its cache.
+
 **Docker (`--docker` / `--docker-all`)**
 
 - Unused images, including tagged images that no container uses
@@ -98,7 +109,7 @@ consuela --report
 
 `--report` scans every group and every opt-in target, prints sizes, and exits. It never deletes, with or without `-y`, and takes no group flags. It takes about a minute on a large disk. The report has three parts:
 
-- **Cleanup targets**: each plan line with the flag that selects it. Sizes are measured on disk. `~` marks an estimate of what the command frees, and `?` an unknown size. Totals show the run without flags and the opt-in flags separately.
+- **Cleanup targets**: each plan line with the flag that selects it, then the other caches of 1G or more that a run at a terminal asks about. Sizes are measured on disk. `~` marks an estimate of what the command frees, and `?` an unknown size. Totals show the run without flags and the opt-in flags separately.
 - **Docker volumes**: name, size, and how many containers use each one.
 - **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, and `docker system df`. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
 

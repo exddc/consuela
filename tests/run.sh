@@ -5,8 +5,9 @@
 # disposable fixture. Tools that could change data (xcrun, docker, npm,
 # poetry, ...) are stubs that record their arguments and exit; they never
 # run the real tool.
-# ok() takes shell expressions in single quotes on purpose.
-# shellcheck disable=SC2016
+# ok() takes shell expressions in single quotes on purpose, and checks
+# match consuela's literal ~ paths.
+# shellcheck disable=SC2016,SC2088
 set -u
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -329,7 +330,7 @@ setup() {
 # Usage: run [consuela args...]. Stdin comes from $STDIN (default /dev/null).
 run() {
   env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=C \
-    CONSUELA_TEST_STATE="$S" \
+    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 \
     CONSUELA_FIXTURE_XCODE_APPS="${XCODE_APPS:-$T/apps/Xcode.app}" \
     CONSUELA_FIXTURE_DEVICES="$S/devices.json" \
     CONSUELA_FIXTURE_RUNTIME_IMAGES="$S/runtime_images.json" \
@@ -352,7 +353,7 @@ run_tty() {
   IFS=$TABSEP
   # shellcheck disable=SC2086
   set -- $answers -- env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=C \
-    CONSUELA_TEST_STATE="$S" \
+    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 \
     CONSUELA_FIXTURE_XCODE_APPS="$T/apps/Xcode.app" CONSUELA_FIXTURE_DEVICES="$S/devices.json" \
     CONSUELA_FIXTURE_RUNTIME_IMAGES="$S/runtime_images.json" CONSUELA_FIXTURE_RUNTIMES="$S/runtimes.json" \
     "$ROOT/consuela" "$@"
@@ -673,6 +674,47 @@ EOF
 run --dry-run --cache
 check "folder owned by another user skipped" contains "$ERR" "skipping $C/node-gyp: $C/node-gyp/20.6.1 is owned by"
 check "skipped folder not planned" lacks "$OUT" "node-gyp headers"
+
+echo "== unknown caches are asked about one by one"
+setup
+mkfile_kb "$H/.cache/bigtool/blobs/a" 102400
+mkfile_kb "$C/OtherApp/data" 102400
+mkfile_kb "$C/some-app-updater/pending/app.zip" 102400
+mkfile_kb "$C/pypoetry/virtualenvs/big/lib/x" 102400
+mkfile_kb "$H/.cache/small/x" 64
+run --dry-run --cache
+check "dry run lists unknown caches" contains "$OUT" "Other caches consuela does not know (asked one by one at a terminal):"
+check "big ~/.cache folder listed" contains "$OUT" "100.0M  ~/.cache/bigtool"
+check "big Library/Caches folder listed" contains "$OUT" "~/Library/Caches/OtherApp"
+check "small folder not listed" lacks "$OUT" "~/.cache/small"
+check "updater cache not listed" lacks "$OUT" "some-app-updater"
+check "folder holding a planned path not listed" lacks "$OUT" "~/Library/Caches/pypoetry"
+check "unknown caches not in this run" lacks "$OUT" "This run:   200"
+run --report
+check "report lists unknown caches" contains "$OUT" "100.0M  ~/.cache/bigtool"
+run -y --cache
+check "-y lists unknown caches as skipped" contains "$OUT" "skipped; run consuela at a terminal without -y"
+check "-y keeps unknown caches" [ -f "$H/.cache/bigtool/blobs/a" ]
+setup
+mkfile_kb "$H/.cache/bigtool/blobs/a" 102400
+mkfile_kb "$C/OtherApp/data" 102400
+mkfile_kb "$C/pypoetry/virtualenvs/big/lib/x" 102400
+run_tty 'Proceed? [y/N] =y' 'Wipe the contents of ~/.cache/bigtool (100.0M)? [y/N] =y' \
+  'Wipe the contents of ~/Library/Caches/OtherApp (100.0M)? [y/N] =n' -- --cache
+check "answered yes exits 0 ($OUT)" [ "$ST" -eq 0 ]
+check "yes empties the folder" [ -z "$(ls -A "$H/.cache/bigtool")" ]
+check "yes keeps the folder itself" [ -d "$H/.cache/bigtool" ]
+check "no keeps the other cache" [ -f "$C/OtherApp/data" ]
+check "virtualenvs never offered" [ -f "$C/pypoetry/virtualenvs/big/lib/x" ]
+ok "unknown caches start at 1G by default" '(HOME=$H; . "$ROOT/consuela"; [ "$UNKNOWN_CACHE_MIN_KB" -eq 1048576 ])'
+run --dry-run --xcode
+check "--xcode alone does not scan unknown caches" lacks "$OUT" "Other caches"
+setup
+rm -rf "$C/pypoetry" "$H/.npm"
+mkfile_kb "$H/.cache/bigtool/blobs/a" 102400
+run_tty 'Wipe the contents of ~/.cache/bigtool (100.0M)? [y/N] =y' -- --cache
+check "empty plan still asks about unknown caches ($OUT)" [ -z "$(ls -A "$H/.cache/bigtool")" ]
+check "empty plan with unknown caches exits 0" [ "$ST" -eq 0 ]
 
 echo "== unsafe paths"
 setup

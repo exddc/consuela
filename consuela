@@ -28,7 +28,9 @@ Any group flag limits the run to the groups you name.
   --cache             npm, npx, Yarn, pnpm, Bun, pip, uv, Poetry (cache and
                       artifacts; virtualenvs kept), Homebrew download cache,
                       brew cleanup, TypeScript, node-gyp, Corepack, Next.js
-                      SWC, Prisma, Electron, and Deno caches
+                      SWC, Prisma, Electron, and Deno caches. At a
+                      terminal, also asks about each other folder of 1G
+                      or more in ~/.cache and ~/Library/Caches
   --docker            unused images (including tagged), containers, build
                       cache; volumes kept. Same as --docker-all
   --docker-all        same as --docker
@@ -969,6 +971,100 @@ scan_cache() {
   add_clear cache "Deno cache" "$HOME/Library/Caches/deno"
 }
 
+UNKNOWN_CACHE_MIN_KB=${CONSUELA_FIXTURE_UNKNOWN_MIN_KB:-1048576}
+
+# Pending app updates, Apple's caches, and folders the report lists for review.
+unknown_cache_skipped() {
+  case "${1##*/}" in
+    *.ShipIt|*-updater|com.apple.*|com.spotify.client|ms-playwright) return 0 ;;
+  esac
+  return 1
+}
+
+overlaps_claimed() {
+  oc_real=$(canonical_path "$1") || return 0
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    case "$oc_real/" in "$c/"*) return 0 ;; esac
+    case "$c/" in "$oc_real/"*) return 0 ;; esac
+  done <<EOF
+$CLAIMED
+EOF
+  return 1
+}
+
+# Sets UNKNOWN_CACHES to "<kb><TAB><path>" lines, largest first, for cache
+# folders of at least UNKNOWN_CACHE_MIN_KB that no plan line covers.
+scan_unknown_caches() {
+  UNKNOWN_CACHES=
+  for d in "$HOME"/.cache/* "$HOME"/Library/Caches/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    if unknown_cache_skipped "$d" || overlaps_claimed "$d" || ! path_is_allowed "$d"; then
+      continue
+    fi
+    [ -n "$(owned_paths "$d")" ] || continue
+    kb=$(du_kb "$d")
+    [ "$kb" -ge "$UNKNOWN_CACHE_MIN_KB" ] || continue
+    UNKNOWN_CACHES="$UNKNOWN_CACHES$kb$TAB$d$NL"
+  done
+  UNKNOWN_CACHES=$(printf '%s' "$UNKNOWN_CACHES" | LC_ALL=C sort -t "$TAB" -k1,1nr)
+}
+
+# Usage: print_unknown_caches <note>
+print_unknown_caches() {
+  echo "Other caches consuela does not know ($1):"
+  printf '%s\n' "$UNKNOWN_CACHES" | while IFS="$TAB" read -r kb p; do
+    printf '   %8s  %s\n' "$(fmt_kb "$kb")" "$TILDE${p#"$HOME"}"
+  done
+}
+
+ask_unknown_caches() {
+  echo "Other caches consuela does not know. Each app downloads or rebuilds what it needs again."
+  while IFS="$TAB" read -r kb p <&3; do
+    [ -n "$p" ] || continue
+    shown="$TILDE${p#"$HOME"}"
+    printf 'Wipe the contents of %s (%s)? [y/N] ' "$shown" "$(fmt_kb "$kb")"
+    read -r ans || ans=n
+    case "$ans" in
+      y|Y|yes|YES) ;;
+      *) continue ;;
+    esac
+    STEP="cache $shown"
+    echo "Cleaning $STEP..."
+    before=$FAIL_COUNT
+    run_ok clear_dir "$p"
+    if [ "$FAIL_COUNT" -ne "$before" ]; then
+      FAILED_STEPS="$FAILED_STEPS  $STEP$NL"
+    fi
+  done 3<<EOF
+$UNKNOWN_CACHES
+EOF
+}
+
+# Asks at a terminal; lists the caches for a dry run, -y, or no terminal.
+handle_unknown_caches() {
+  [ -n "$UNKNOWN_CACHES" ] || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    print_unknown_caches "asked one by one at a terminal"
+  elif [ "$YES" -eq 1 ] || [ ! -t 0 ]; then
+    print_unknown_caches "skipped; run consuela at a terminal without -y to choose"
+  else
+    ask_unknown_caches
+  fi
+  echo
+}
+
+finish_run() {
+  if [ -n "$FAILED_STEPS" ]; then
+    n=$(printf '%s' "$FAILED_STEPS" | awk 'END { print NR }')
+    echo "Done with $n failed step(s):" >&2
+    printf '%s' "$FAILED_STEPS" >&2
+    exit 1
+  fi
+  echo "Done."
+  exit 0
+}
+
 # Docker reports sizes in decimal units, for example 6.844GB or 0B (0%).
 # Prints ? for a size it cannot read.
 docker_size_kb() {
@@ -1523,6 +1619,7 @@ run_report() {
   scan_xcodebuildmcp
   scan_cache
   scan_docker
+  scan_unknown_caches
 
   defaults="xcode cache docker"
   optin="xcode-previews xcodebuildmcp"
@@ -1541,6 +1638,10 @@ run_report() {
     "$(sum_plan_kb firm "$optin")" "$(sum_plan_kb estimate "$optin")" \
     "$(count_plan unknown "$optin")")"
   echo
+  if [ -n "$UNKNOWN_CACHES" ]; then
+    print_unknown_caches "a run at a terminal asks about each one"
+    echo
+  fi
   if [ -n "$DOCKER_SHOW_VOLUMES" ]; then
     print_docker_volumes
     echo
@@ -1679,6 +1780,9 @@ consuela_main() {
   if [ -n "$DOCKER_VOLUMES" ]; then
     scan_docker_volumes
   fi
+  if [ "$DO_CACHE" -eq 1 ]; then
+    scan_unknown_caches
+  fi
 
   firm_kb=$(sum_plan_kb firm)
   estimate_kb=$(sum_plan_kb estimate)
@@ -1693,8 +1797,17 @@ consuela_main() {
       print_docker_volumes
       echo
     fi
-    echo "Nothing to clean."
-    exit 0
+    if [ -z "$UNKNOWN_CACHES" ]; then
+      echo "Nothing to clean."
+      exit 0
+    fi
+    FAILED_STEPS=
+    handle_unknown_caches
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "Dry run: nothing deleted."
+      exit 0
+    fi
+    finish_run
   fi
 
   echo
@@ -1704,6 +1817,9 @@ consuela_main() {
   if [ -n "$DOCKER_SHOW_VOLUMES" ]; then
     print_docker_volumes
     echo
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    handle_unknown_caches
   fi
 
   need_confirm=$((1 - YES))
@@ -1754,13 +1870,11 @@ consuela_main() {
 
   echo
   run_plan
-  if [ -n "$FAILED_STEPS" ]; then
-    n=$(printf '%s' "$FAILED_STEPS" | awk 'END { print NR }')
-    echo "Done with $n failed step(s):" >&2
-    printf '%s' "$FAILED_STEPS" >&2
-    exit 1
+  if [ -n "$UNKNOWN_CACHES" ]; then
+    echo
+    handle_unknown_caches
   fi
-  echo "Done."
+  finish_run
 }
 
 FAIL_COUNT=0
@@ -1774,6 +1888,7 @@ DOCKER_VOLUMES=
 DOCKER_VOLUMES_STATE=
 DOCKER_VOLUME_ROWS=
 DOCKER_SHOW_VOLUMES=
+UNKNOWN_CACHES=
 YES=0
 DOCKER_MODE=all
 init_safety
