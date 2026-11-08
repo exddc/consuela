@@ -1652,14 +1652,19 @@ report_pending_deletes() {
   if [ -n "$tmp" ]; then
     n=0
     kb=0
+    partial=
     for d in "${tmp%/}"/Deleting-*; do
       [ -d "$d" ] && [ ! -L "$d" ] || continue
       n=$((n + 1))
-      kb=$((kb + $(du_kb "$d")))
+      m=$(measure_kb "$d")
+      kb=$((kb + ${m%% *}))
+      [ "${m#* }" = ok ] || partial='>'
     done
     if [ "$n" -gt 0 ]; then
-      printf '  %9s  %s\n' "$(fmt_kb "$kb")" "$n Deleting-* folder(s) in the temp folder"
-      printf '             %s\n' "pending deletes, such as removed simulators; macOS removes them in the background or at restart"
+      note="pending deletes, such as removed simulators; macOS removes them in the background or at restart"
+      [ -z "$partial" ] || note="$note; part of it is unreadable"
+      printf '  %9s  %s\n' "$partial$(fmt_kb "$kb")" "$n Deleting-* folder(s) in the temp folder"
+      printf '             %s\n' "$note"
     fi
   fi
   pending=$(deleting_runtimes) || pending=

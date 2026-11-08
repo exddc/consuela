@@ -473,6 +473,14 @@ ok "report deletes no pending folder" '[ "$before" = "$(inventory)" ] && [ -d "$
 printf '{"A": {"identifier": "A", "state": "Deleting", "sizeBytes": "n/a"}}' >"$S/runtime_images.json"
 run --report
 ok "malformed runtime sizes still finish the report" '[ "$ST" -eq 0 ] && contains "$OUT" "Report only: nothing deleted."'
+setup
+mkfile_kb "$T/tmp/Deleting-3333/data/blob" 64
+mkfile_kb "$T/tmp/Deleting-3333/locked/blob" 64
+chmod 000 "$T/tmp/Deleting-3333/locked"
+run --report
+chmod -R u+rwx "$T/tmp/Deleting-3333/locked"
+ok "unreadable Deleting folder is marked >" 'printf "%s\n" "$OUT" | grep -q ">[0-9.]*[KMG]  1 Deleting-\* folder(s)"'
+check "unreadable Deleting folder says so" contains "$OUT" "part of it is unreadable"
 
 echo "== XcodeBuildMCP keeps state, locks, sources, active runs"
 setup
