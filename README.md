@@ -111,7 +111,7 @@ consuela --report
 
 - **Cleanup targets**: each plan line with the flag that selects it, then the other caches of 1G or more that a run at a terminal asks about. Sizes are measured on disk. `~` marks an estimate of what the command frees, and `?` an unknown size. Totals show the run without flags and the opt-in flags separately.
 - **Docker volumes**: name, size, and how many containers use each one.
-- **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, and `docker system df`. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
+- **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, `docker system df`, and space that frees itself: Time Machine local snapshots, `Deleting-*` folders in the temp folder, and simulator runtimes that simctl is still deleting. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
 
 The report checks fixed paths only. It does not search the whole disk.
 
@@ -185,7 +185,7 @@ With group flags, consuela scans only those groups.
 
 consuela exits 0 after a dry run or report, when nothing needs cleaning, or when every step succeeds. It exits 1 for a usage error, a declined prompt, a failed step, or when it cannot start, for example outside macOS. When a step fails, consuela runs the remaining steps and lists the failed ones on stderr. If consuela cannot scan something, such as Docker with the daemon stopped, it prints a warning and skips it. The exit status does not change.
 
-Disk Utility may still report the old free space until Time Machine local snapshots expire. The delay is not a failed cleanup.
+Disk Utility may still report the old free space until Time Machine local snapshots expire. The delay is not a failed cleanup. `consuela --report` lists the snapshots and the deletes macOS has not finished yet. To free the snapshots right away, run `tmutil deletelocalsnapshots /`. That also removes these local restore points, and consuela never runs it.
 
 ## Cleanup policy
 

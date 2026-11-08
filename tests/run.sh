@@ -69,6 +69,13 @@ case "$*" in
 esac
 exit 1
 EOF
+  stub tmutil <<'EOF'
+#!/bin/sh
+S=$CONSUELA_TEST_STATE
+echo "tmutil $*" >>"$S/calls"
+[ "$*" = "listlocalsnapshots /" ] || echo "tmutil $*" >>"$S/mutations"
+cat "$S/tmutil" 2>/dev/null
+EOF
   stub xcode-select <<'EOF'
 #!/bin/sh
 echo /Applications/Xcode.app/Contents/Developer
@@ -330,7 +337,7 @@ setup() {
 # Usage: run [consuela args...]. Stdin comes from $STDIN (default /dev/null).
 run() {
   env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=C \
-    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 \
+    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 CONSUELA_FIXTURE_TEMP_DIR="$T/tmp" \
     CONSUELA_FIXTURE_XCODE_APPS="${XCODE_APPS:-$T/apps/Xcode.app}" \
     CONSUELA_FIXTURE_DEVICES="$S/devices.json" \
     CONSUELA_FIXTURE_RUNTIME_IMAGES="$S/runtime_images.json" \
@@ -353,7 +360,7 @@ run_tty() {
   IFS=$TABSEP
   # shellcheck disable=SC2086
   set -- $answers -- env -i HOME="$H" TMPDIR="$T/tmp" PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" LANG=C \
-    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 \
+    CONSUELA_TEST_STATE="$S" CONSUELA_FIXTURE_UNKNOWN_MIN_KB=102400 CONSUELA_FIXTURE_TEMP_DIR="$T/tmp" \
     CONSUELA_FIXTURE_XCODE_APPS="$T/apps/Xcode.app" CONSUELA_FIXTURE_DEVICES="$S/devices.json" \
     CONSUELA_FIXTURE_RUNTIME_IMAGES="$S/runtime_images.json" CONSUELA_FIXTURE_RUNTIMES="$S/runtimes.json" \
     "$ROOT/consuela" "$@"
@@ -444,6 +451,28 @@ check "default total holds Docker's ~3.7G estimate, not the volume: $default_lin
 check "default total leaves out the 6.4G volume" lacks "$default_line" "6.4G"
 run --report --xcode
 check "--report rejects group flags" [ "$ST" -eq 1 ]
+
+echo "== report shows space that frees itself"
+setup
+run --report
+check "no snapshots, no snapshot line" lacks "$OUT" "Time Machine"
+check "no pending deletes, no line" lacks "$OUT" "Deleting-*"
+check "no runtimes being deleted, no line" lacks "$OUT" "being deleted"
+printf 'Snapshots for disk /:\ncom.apple.TimeMachine.2026-11-07-101010.local (dataless)\ncom.apple.TimeMachine.2026-11-08-163808.local (dataless)\n' >"$S/tmutil"
+mkfile_kb "$T/tmp/Deleting-1111/data/blob" 64
+mkfile_kb "$T/tmp/Deleting-2222/data/blob" 64
+printf '{"A": {"identifier": "A", "state": "Deleting", "sizeBytes": 8589934592}, "B": {"identifier": "B", "state": "Ready", "sizeBytes": 1073741824}}' >"$S/runtime_images.json"
+before=$(inventory)
+run --report
+check "report counts snapshots and names the newest" contains "$OUT" "?  2 Time Machine local snapshot(s), newest 2026-11-08-163808"
+check "report says how to free snapshots" contains "$OUT" "tmutil deletelocalsnapshots / removes these local restore points now"
+check "report sums pending Deleting folders" contains "$OUT" "128K  2 Deleting-* folder(s) in the temp folder"
+check "report sums runtimes being deleted" contains "$OUT" "8.0G  1 simulator runtime(s) being deleted"
+check "report runs no tmutil change" [ -z "$(mutations)" ]
+ok "report deletes no pending folder" '[ "$before" = "$(inventory)" ] && [ -d "$T/tmp/Deleting-1111" ]'
+printf '{"A": {"identifier": "A", "state": "Deleting", "sizeBytes": "n/a"}}' >"$S/runtime_images.json"
+run --report
+ok "malformed runtime sizes still finish the report" '[ "$ST" -eq 0 ] && contains "$OUT" "Report only: nothing deleted."'
 
 echo "== XcodeBuildMCP keeps state, locks, sources, active runs"
 setup
