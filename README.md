@@ -79,6 +79,7 @@ These flags are never part of a run without flags. Name them to include them. A 
 | `--xcode-previews` | Xcode Previews simulators, with `xcrun simctl --set "~/Library/Developer/Xcode/UserData/Previews/Simulator Devices" delete all` | the rest of `Xcode/UserData`, and `Simulator%20Devices` |
 | `--xcodebuildmcp` | in `~/Library/Developer/XcodeBuildMCP/workspaces/*`: the contents of `DerivedData`, and finished `test-products/*.xctestproducts` with their completion markers | `state`, `locks`, `logs`, `result-bundles`, other files, and whole workspaces that hold a lock |
 | `--fusion` | in `~/Library/Application Support/Autodesk/webdeploy/production`: Fusion version folders no launcher points to, and with them launchers whose version is gone | the active version, its launcher, `meta`, folders without a Fusion app, and folders newer than the launchers |
+| `--simulators` | what you pick at the prompts: downloaded runtimes with their simulators, and simulators of 100M or more (delete or erase) | everything you do not pick, and running simulators |
 | `--docker-volume NAME` | one named Docker volume, with `docker volume rm NAME` | every volume you did not name |
 
 **Xcode Previews.** simctl deletes only registered devices, the folders with a `device.plist`. Folders without one stay. consuela never deletes `Xcode/UserData` itself. The Xcode check described above also covers this flag.
@@ -99,6 +100,15 @@ consuela checks these rules again right before it deletes. When `XcodeBuildMCP` 
 
 consuela skips the whole flag when no launcher points to a version, or when a process runs from `webdeploy`, such as Fusion or its streamer. It checks these rules again right before it deletes. Open Fusion once afterwards to confirm it starts.
 
+**Simulators.** `--simulators` asks about each item at a terminal. It never picks a runtime or simulator by itself. With `-y`, `--dry-run`, or without a terminal, it lists the items and deletes none of them. Their sizes are not part of "This run".
+
+- **Runtimes**: `Delete runtime iOS 18.5 (8.0G) and its 13 simulator(s) (4.2G)? [y/N]`. `y` runs `xcrun simctl delete` on those simulators, then `xcrun simctl runtime delete`. Deleting the simulators first leaves none without a runtime. A runtime serves every Xcode on the Mac. Xcode > Settings > Components downloads it again.
+- **Simulators** of 100M or more: `Big Phone (iOS 26.5, 4.0G, last used 2026-09-16): delete, erase, or keep? [d/e/K]`. `e` runs `xcrun simctl erase`, which resets the simulator to factory state and keeps it.
+
+consuela asks about runtimes first, largest first, and skips the simulators of a runtime you deleted. The runtime that matches the selected Xcode's simulator SDK is marked `[selected Xcode]`. It offers only runtimes that `xcrun simctl runtime list` reports as ready and deletable, and that have no second image. A running simulator is never offered, and neither is its runtime.
+
+Right before each step, consuela checks the simulator states again. It skips runtimes while any simulator runs (`launchd_sim`), in any device set, because Previews and test clones are not in `simctl list`. It reads the runtime's simulators again at that moment, so a simulator created after the scan is deleted with its runtime.
+
 **ShipIt folders are never deleted.** Electron apps stage updates in `~/Library/Caches/<id>.ShipIt`. `ShipItState.plist` is JSON, and its `updateBundleURL` names the pending update. Cursor, for example, can hold a pending update that it installs on the next quit. `--report` lists these folders with the pending update and whether the updater runs.
 
 **Docker volumes.** `--docker-volume NAME` deletes only the volumes you name. Repeat the flag for more. consuela never picks a volume from its name, age, size, or link count. It refuses a volume when:
@@ -116,10 +126,11 @@ Each volume asks you to type its name at a terminal. This happens even with `-y`
 consuela --report
 ```
 
-`--report` scans every group and every opt-in target, prints sizes, and exits. It never deletes, with or without `-y`, and takes no group flags. It takes about a minute on a large disk. The report has three parts:
+`--report` scans every group and every opt-in target, prints sizes, and exits. It never deletes, with or without `-y`, and takes no group flags. It takes about a minute on a large disk. The report has these parts:
 
 - **Cleanup targets**: each plan line with the flag that selects it, then the other caches of 1G or more that a run at a terminal asks about. Sizes are measured on disk. `~` marks an estimate of what the command frees, and `?` an unknown size. Totals show the run without flags and the opt-in flags separately.
 - **Docker volumes**: name, size, and how many containers use each one.
+- **Simulators and runtimes**: what `--simulators` would ask about.
 - **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders that `--fusion` keeps (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, `docker system df`, and space that frees itself: Time Machine local snapshots, `Deleting-*` folders in the temp folder, and simulator runtimes that simctl is still deleting. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
 
 The report checks fixed paths only. It does not search the whole disk.
@@ -187,6 +198,7 @@ consuela --xcode --cache
 consuela --dry-run --cache
 consuela --dry-run --xcode-previews --xcodebuildmcp
 consuela --fusion
+consuela --simulators
 consuela --docker-volume my-volume
 consuela --report
 ```

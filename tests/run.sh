@@ -60,6 +60,7 @@ write_stubs() {
 S=$CONSUELA_TEST_STATE
 echo "xcrun $*" >>"$S/calls"
 if [ "$1" = --find ]; then echo /usr/bin/simctl; exit 0; fi
+if [ "$1" = --sdk ]; then cat "$S/sdk" 2>/dev/null; exit; fi
 case "$*" in
   *delete*|*erase*)
     echo "xcrun $*" >>"$S/mutations"
@@ -644,6 +645,137 @@ fusion_setup
 rm "$F/Autodesk Fusion.app"
 run --report
 check "report without a launcher says --fusion skips" contains "$OUT" "no launcher resolves to a version, so --fusion skips it"
+
+echo "== simulators are asked about one by one"
+R18=com.apple.CoreSimulator.SimRuntime.iOS-18-5
+R26=com.apple.CoreSimulator.SimRuntime.iOS-26-5
+OLD1=AAAAAAAA-0000-0000-0000-000000000001
+OLD2=AAAAAAAA-0000-0000-0000-000000000002
+BIG=BBBBBBBB-0000-0000-0000-000000000001
+MID=BBBBBBBB-0000-0000-0000-000000000002
+IMG18=11111111-1111-1111-1111-111111111111
+sims_setup() {
+  setup
+  cat >"$S/devices.json" <<EOF
+{"devices": {
+  "$R18": [
+    {"udid": "$OLD1", "name": "Old Phone", "state": "Shutdown", "isAvailable": true, "dataPathSize": 2147483648, "lastUsedAt": "2026-01-02T00:00:00Z"},
+    {"udid": "$OLD2", "name": "Old Pad", "state": "Shutdown", "isAvailable": true, "dataPathSize": 1048576}
+  ],
+  "$R26": [
+    {"udid": "$BIG", "name": "Big Phone", "state": "Shutdown", "isAvailable": true, "dataPathSize": 4294967296, "lastUsedAt": "2026-09-16T08:37:35Z"},
+    {"udid": "$MID", "name": "Mid Phone", "state": "Shutdown", "isAvailable": true, "dataPathSize": 1073741824},
+    {"udid": "BBBBBBBB-0000-0000-0000-000000000003", "name": "Tiny Phone", "state": "Shutdown", "isAvailable": true, "dataPathSize": 1048576},
+    {"udid": "BBBBBBBB-0000-0000-0000-000000000004", "name": "Live Phone", "state": "Booted", "isAvailable": true, "dataPathSize": 3221225472}
+  ]
+}}
+EOF
+  cat >"$S/runtime_images.json" <<EOF
+{"$IMG18": {"identifier": "$IMG18", "runtimeIdentifier": "$R18", "state": "Ready", "deletable": true, "sizeBytes": 8589934592},
+ "22222222-2222-2222-2222-222222222222": {"identifier": "22222222-2222-2222-2222-222222222222", "runtimeIdentifier": "$R26", "state": "Ready", "deletable": true, "sizeBytes": 8589934592}}
+EOF
+  cat >"$S/runtimes.json" <<EOF
+{"runtimes": [{"identifier": "$R18", "name": "iOS 18.5", "platform": "iOS", "version": "18.5", "isAvailable": true},
+              {"identifier": "$R26", "name": "iOS 26.5", "platform": "iOS", "version": "26.5", "isAvailable": true}]}
+EOF
+}
+RT18_PROMPT='Delete runtime iOS 18.5 (8.0G) and its 2 simulator(s) (2.0G)? [y/N] '
+BIG_PROMPT='Big Phone (iOS 26.5, 4.0G, last used 2026-09-16): delete, erase, or keep? [d/e/K] '
+OLD_PROMPT='Old Phone (iOS 18.5, 2.0G, last used 2026-01-02): delete, erase, or keep? [d/e/K] '
+MID_PROMPT='Mid Phone (iOS 26.5, 1.0G, last used never): delete, erase, or keep? [d/e/K] '
+sims_setup
+run --dry-run --simulators
+check "simulators dry run exits 0 ($ST: $ERR)" [ "$ST" -eq 0 ]
+check "simulators are not part of This run" contains "$OUT" "This run:   0B"
+check "dry run lists the runtime with its simulators" contains "$OUT" "10.0G  runtime iOS 18.5 with 2 simulator(s)"
+check "dry run lists a big simulator" contains "$OUT" "4.0G  Big Phone (iOS 26.5, last used 2026-09-16)"
+check "small simulator not offered" lacks "$OUT" "Tiny Phone"
+check "running simulator not offered" lacks "$OUT" "Live Phone"
+check "runtime with a running simulator not offered" lacks "$OUT" "runtime iOS 26.5"
+check "dry run deletes nothing" [ -z "$(mutations)" ]
+run -y --simulators
+check "-y lists simulators as skipped" contains "$OUT" "skipped; run consuela --simulators at a terminal without -y"
+check "-y deletes no simulator" [ -z "$(mutations)" ]
+run --report
+check "report lists simulators to ask about" contains "$OUT" "consuela --simulators asks about each one at a terminal"
+run --dry-run
+check "default run leaves out simulators" lacks "$OUT" "Big Phone"
+sims_setup
+run_tty "$RT18_PROMPT=y" "$BIG_PROMPT=e" "$MID_PROMPT=d" -- --simulators
+check "simulators run exits 0 ($OUT)" [ "$ST" -eq 0 ]
+expected="xcrun simctl delete $OLD1 $OLD2
+xcrun simctl runtime delete $IMG18
+xcrun simctl erase $BIG
+xcrun simctl delete $MID"
+check "runtime goes after its simulators, then each answer runs: $(mutations)" [ "$(mutations)" = "$expected" ]
+check "simulators of a deleted runtime are not asked again" lacks "$OUT" "Old Phone ("
+sims_setup
+run_tty "$RT18_PROMPT=n" "$BIG_PROMPT=" "$OLD_PROMPT=d" "$MID_PROMPT=k" -- --simulators
+check "declined runtime keeps it and asks about its simulators: $(mutations)" [ "$(mutations)" = "xcrun simctl delete $OLD1" ]
+sims_setup
+: >"$S/xcrun_fail"
+run_tty "$RT18_PROMPT=y" "$BIG_PROMPT=k" "$MID_PROMPT=k" -- --simulators
+check "failed simulator delete keeps the runtime" lacks "$(mutations)" "runtime delete"
+ok "failed runtime step fails the run" '[ "$ST" -eq 1 ] && contains "$OUT" "Done with 1 failed step(s)"'
+ok "failed runtime step is listed" 'printf "%s\n" "$OUT" | grep -q "^  runtime iOS 18.5"'
+sims_setup
+echo "55 launchd_sim /sbin/launchd_sim" >"$S/procs"
+run_tty "$BIG_PROMPT=k" "$OLD_PROMPT=k" "$MID_PROMPT=k" -- --simulators
+check "running simulator elsewhere skips runtime prompts ($OUT)" contains "$OUT" "Skipping runtime iOS 18.5: a simulator is running"
+check "running simulator elsewhere deletes no runtime" [ -z "$(mutations)" ]
+sims_setup
+echo 18.5 >"$S/sdk"
+run --dry-run --simulators
+check "runtime of the selected Xcode is marked" contains "$OUT" "runtime iOS 18.5 [selected Xcode] with 2 simulator(s)"
+run --simulators
+check "no terminal lists simulators as skipped" contains "$OUT" "skipped; run consuela --simulators at a terminal"
+check "no terminal deletes no simulator" [ -z "$(mutations)" ]
+sims_setup
+cat >"$S/runtime_images.json" <<EOF
+{"C1": {"identifier": "33333333-3333-3333-3333-333333333331", "runtimeIdentifier": "$R18", "state": "Ready", "sizeBytes": 1073741824},
+ "C2": {"identifier": "33333333-3333-3333-3333-333333333332", "runtimeIdentifier": "$R18", "state": "Ready", "sizeBytes": 1073741824},
+ "D": {"identifier": "44444444-4444-4444-4444-444444444444", "runtimeIdentifier": "$R26", "state": "Deleting", "sizeBytes": 1073741824}}
+EOF
+printf '{"devices": {}}' >"$S/devices.json"
+run --dry-run --simulators
+check "runtime with two images or not Ready is not offered" contains "$OUT" "Nothing to clean."
+cat >"$S/runtime_images.json" <<EOF
+{"E": {"identifier": "55555555-5555-5555-5555-555555555555", "runtimeIdentifier": "$R18", "state": "Ready", "deletable": false, "sizeBytes": 1073741824}}
+EOF
+run --dry-run --simulators
+check "runtime simctl cannot delete is not offered" contains "$OUT" "Nothing to clean."
+sims_setup
+(
+  HOME=$H TMPDIR=$T/tmp PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" CONSUELA_TEST_STATE=$S
+  CONSUELA_FIXTURE_DEVICES=$S/devices.json CONSUELA_FIXTURE_RUNTIME_IMAGES=$S/runtime_images.json
+  CONSUELA_FIXTURE_RUNTIMES=$S/runtimes.json
+  export HOME TMPDIR PATH CONSUELA_TEST_STATE CONSUELA_FIXTURE_DEVICES CONSUELA_FIXTURE_RUNTIME_IMAGES CONSUELA_FIXTURE_RUNTIMES
+  # shellcheck source=../consuela disable=SC1091
+  . "$ROOT/consuela"
+  scan_simulators
+  sed "s/\"name\": \"Big Phone\", \"state\": \"Shutdown\"/\"name\": \"Big Phone\", \"state\": \"Booted\"/" "$S/devices.json" >"$S/d2"
+  mv "$S/d2" "$S/devices.json"
+  simulator_device_act delete "$BIG" 2>/dev/null
+  [ "$FAIL_COUNT" -eq 1 ] || exit 1
+)
+check "simulator booted after the scan fails its step" [ $? -eq 0 ]
+check "simulator booted after the scan is kept" [ -z "$(mutations)" ]
+sims_setup
+(
+  HOME=$H TMPDIR=$T/tmp PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" CONSUELA_TEST_STATE=$S
+  CONSUELA_FIXTURE_DEVICES=$S/devices.json CONSUELA_FIXTURE_RUNTIME_IMAGES=$S/runtime_images.json
+  CONSUELA_FIXTURE_RUNTIMES=$S/runtimes.json
+  export HOME TMPDIR PATH CONSUELA_TEST_STATE CONSUELA_FIXTURE_DEVICES CONSUELA_FIXTURE_RUNTIME_IMAGES CONSUELA_FIXTURE_RUNTIMES
+  # shellcheck source=../consuela disable=SC1091
+  . "$ROOT/consuela"
+  scan_simulators
+  sed "s/\"name\": \"Old Pad\", \"state\": \"Shutdown\"/\"name\": \"Old Pad\", \"state\": \"Booted\"/" "$S/devices.json" >"$S/d2"
+  mv "$S/d2" "$S/devices.json"
+  simulator_runtime_remove "$IMG18" "$R18" 2>/dev/null
+  [ "$FAIL_COUNT" -eq 1 ] || exit 1
+)
+check "runtime whose simulator booted after the scan fails its step" [ $? -eq 0 ]
+check "runtime whose simulator booted after the scan is kept" [ -z "$(mutations)" ]
 
 echo "== Poetry keeps virtualenvs"
 setup

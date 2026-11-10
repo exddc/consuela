@@ -11,7 +11,7 @@ TILDE='~'
 usage() {
   cat <<'EOF'
 usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling]
-                [--xcode-previews] [--xcodebuildmcp] [--fusion]
+                [--xcode-previews] [--xcodebuildmcp] [--fusion] [--simulators]
                 [--docker-volume NAME]... [-y] [--dry-run]
        consuela --report [-y]
        consuela --update
@@ -44,6 +44,10 @@ Opt-in:
                       workspaces with a held lock are skipped
   --fusion            Fusion webdeploy versions no launcher points to, and
                       broken launchers; skipped while Fusion runs
+  --simulators        asks at a terminal about each downloaded runtime
+                      (deleted with its simulators) and each simulator of
+                      100M or more (delete, erase, or keep); running ones
+                      are never offered
   --docker-volume NAME
                       delete one named Docker volume; repeat for more.
                       Each needs the name typed at a terminal, even with -y.
@@ -614,6 +618,259 @@ try:
 except Exception as e:
     print("warning: could not scan unavailable runtimes: %s" % e, file=sys.stderr)
 PY
+}
+
+SIM_ASK_MIN_KB=102400
+
+# Usage: simulator_py inventory | busy | runtime <runtime id>.
+# inventory prints the rows --simulators asks about, runtimes first, largest
+# first:
+#   runtime<TAB><image id><TAB><runtime id><TAB><name><TAB><runtime kb><TAB><simulators><TAB><simulators kb>
+#   device<TAB><udid><TAB><runtime id><TAB><name><TAB><runtime name><TAB><kb><TAB><last used day>
+# busy prints the UDIDs of simulators that are not shut down. runtime prints
+# the UDIDs of the runtime's simulators, and exits 3 when one is not shut
+# down. Fails when simctl cannot answer.
+simulator_py() {
+  python3 - "$SIM_ASK_MIN_KB" "$@" <<'PY'
+import json, os, re, subprocess, sys
+
+FIXTURES = {
+    ("list", "devices", "-j"): "CONSUELA_FIXTURE_DEVICES",
+    ("runtime", "list", "-j"): "CONSUELA_FIXTURE_RUNTIME_IMAGES",
+    ("list", "runtimes", "-j"): "CONSUELA_FIXTURE_RUNTIMES",
+}
+UUID = re.compile(r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$")
+
+def load(args):
+    path = os.environ.get(FIXTURES[tuple(args)])
+    if path:
+        with open(path, "rb") as f:
+            raw = f.read()
+    else:
+        raw = subprocess.check_output(["xcrun", "simctl"] + args, stderr=subprocess.DEVNULL)
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise TypeError("simctl %s JSON must be an object" % " ".join(args))
+    return data
+
+def clean(s):
+    return re.sub(r"[\t\n]", " ", str(s))
+
+def du_kb(path):
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        return int(subprocess.check_output(["du", "-sk", path], stderr=subprocess.DEVNULL).split()[0])
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return 0
+
+def dev_kb(d):
+    size = d.get("dataPathSize") or 0
+    return int(size) // 1024 if size else du_kb(d.get("dataPath"))
+
+try:
+    devices = {}
+    for rid, devs in load(["list", "devices", "-j"]).get("devices", {}).items():
+        for d in devs:
+            if d.get("isAvailable", True) and UUID.match(d.get("udid") or ""):
+                devices.setdefault(rid, []).append(d)
+    if sys.argv[2] == "busy":
+        for devs in devices.values():
+            for d in devs:
+                if d.get("state") != "Shutdown":
+                    print(d["udid"])
+        sys.exit(0)
+    if sys.argv[2] == "runtime":
+        devs = devices.get(sys.argv[3], [])
+        if any(d.get("state") != "Shutdown" for d in devs):
+            sys.exit(3)
+        print(" ".join(d["udid"] for d in devs))
+        sys.exit(0)
+    runtimes = {rt.get("identifier"): rt for rt in load(["list", "runtimes", "-j"]).get("runtimes", [])}
+    images = [img for img in load(["runtime", "list", "-j"]).values() if isinstance(img, dict)]
+except Exception as e:
+    print("warning: could not list simulators: %s" % e, file=sys.stderr)
+    sys.exit(1)
+
+min_kb = int(sys.argv[1])
+try:
+    sdk = subprocess.check_output(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"],
+                                  stderr=subprocess.DEVNULL).decode().strip()
+except (OSError, subprocess.CalledProcessError):
+    sdk = None
+per_rid = {}
+for img in images:
+    rid = img.get("runtimeIdentifier")
+    per_rid[rid] = per_rid.get(rid, 0) + 1
+rows = []
+for img in images:
+    rid = img.get("runtimeIdentifier")
+    rt = runtimes.get(rid) or {}
+    if not rt.get("isAvailable") or img.get("deletable") is False or img.get("state") != "Ready":
+        continue
+    if per_rid[rid] != 1 or not UUID.match(img.get("identifier") or ""):
+        continue
+    devs = devices.get(rid, [])
+    if any(d.get("state") != "Shutdown" for d in devs):
+        continue
+    rt_kb = int(img.get("sizeBytes") or 0) // 1024
+    sims_kb = sum(dev_kb(d) for d in devs)
+    name = clean(rt.get("name") or rid)
+    if sdk and rt.get("platform") == "iOS" and rt.get("version") == sdk:
+        name += " [selected Xcode]"
+    rows.append((rt_kb + sims_kb, ["runtime", img["identifier"], rid, name, rt_kb, len(devs), sims_kb]))
+for rid, devs in devices.items():
+    rname = clean((runtimes.get(rid) or {}).get("name") or rid.rsplit(".", 1)[-1])
+    for d in devs:
+        kb = dev_kb(d)
+        if d.get("state") != "Shutdown" or kb < min_kb:
+            continue
+        day = (d.get("lastUsedAt") or "")[:10] or "never"
+        rows.append((kb, ["device", d["udid"], rid, clean(d.get("name") or d["udid"]), rname, kb, day]))
+rows.sort(key=lambda r: (r[1][0] != "runtime", -r[0]))
+for _, row in rows:
+    print("\t".join(str(x) for x in row))
+PY
+}
+
+# Sets SIM_ROWS to what --simulators asks about.
+scan_simulators() {
+  SIM_ROWS=
+  if ! xcode_ready || ! have_dev_tool python3; then
+    warn "Xcode or python3 not found; skipping --simulators"
+    return 0
+  fi
+  SIM_ROWS=$(simulator_py inventory) || SIM_ROWS=
+}
+
+# Usage: print_simulators <note>
+print_simulators() {
+  echo "Simulators and runtimes ($1):"
+  printf '%s\n' "$SIM_ROWS" | while IFS="$TAB" read -r kind _ _ name f5 f6 f7; do
+    case "$kind" in
+      runtime) printf '   %8s  runtime %s with %s simulator(s)\n' "$(fmt_kb $((f5 + f7)))" "$name" "$f6" ;;
+      device) printf '   %8s  %s (%s, last used %s)\n' "$(fmt_kb "$f6")" "$name" "$f5" "$f7" ;;
+    esac
+  done
+}
+
+# Fails, with the reason on stderr, when simulator $1 runs or the check
+# fails.
+simulator_idle() {
+  if ! busy=$(simulator_py busy); then
+    echo "  skipped: cannot read simulator states" >&2
+    return 1
+  fi
+  if printf '%s\n' "$busy" | grep -qxF -- "$1"; then
+    echo "  skipped: simulator $1 is running now" >&2
+    return 1
+  fi
+}
+
+# Prints running simulators of any device set, such as Previews or test
+# clones, which simctl list does not show. Fails when pgrep cannot answer.
+running_simulators() {
+  pgrep_procs -x -u "$(id -u)" launchd_sim
+}
+
+# Usage: simulator_runtime_remove <image id> <runtime id>. Refuses while any
+# simulator runs. Deletes the runtime's simulators first, so none is left
+# without its runtime.
+simulator_runtime_remove() {
+  if ! procs=$(running_simulators) || [ -n "$procs" ]; then
+    echo "  skipped: a simulator is running now, or the check failed" >&2
+    fail
+    return 0
+  fi
+  udids=$(simulator_py runtime "$2") && rc=0 || rc=$?
+  case "$rc" in
+    0) ;;
+    3)
+      echo "  skipped: a simulator of this runtime is running now" >&2
+      fail
+      return 0
+      ;;
+    *)
+      echo "  skipped: cannot read simulator states" >&2
+      fail
+      return 0
+      ;;
+  esac
+  if [ -n "$udids" ]; then
+    # shellcheck disable=SC2086
+    xcrun simctl delete $udids || { fail; return 0; }
+  fi
+  run_ok xcrun simctl runtime delete "$1"
+}
+
+# Usage: simulator_device_act <delete|erase> <udid>
+simulator_device_act() {
+  simulator_idle "$2" || { fail; return 0; }
+  run_ok xcrun simctl "$1" "$2"
+}
+
+ask_simulators() {
+  echo "Simulators and runtimes. A runtime serves every Xcode on this Mac; Xcode > Settings > Components downloads it again."
+  gone=
+  while IFS="$TAB" read -r kind id rid name f5 f6 f7 <&3; do
+    [ -n "$kind" ] || continue
+    if printf '%s' "$gone" | grep -qxF -- "$rid"; then
+      continue
+    fi
+    case "$kind" in
+      runtime)
+        if ! procs=$(running_simulators) || [ -n "$procs" ]; then
+          echo "Skipping runtime $name: a simulator is running. Shut down every simulator to delete runtimes."
+          continue
+        fi
+        printf 'Delete runtime %s (%s) and its %s simulator(s) (%s)? [y/N] ' \
+          "$name" "$(fmt_kb "$f5")" "$f6" "$(fmt_kb "$f7")"
+        read -r ans || ans=n
+        case "$ans" in
+          y|Y|yes|YES) ;;
+          *) continue ;;
+        esac
+        gone="$gone$rid$NL"
+        STEP="runtime $name"
+        echo "Cleaning $STEP..."
+        before=$FAIL_COUNT
+        simulator_runtime_remove "$id" "$rid"
+        ;;
+      device)
+        printf '%s (%s, %s, last used %s): delete, erase, or keep? [d/e/K] ' \
+          "$name" "$f5" "$(fmt_kb "$f6")" "$f7"
+        read -r ans || ans=k
+        case "$ans" in
+          d|D|delete) act=delete ;;
+          e|E|erase) act=erase ;;
+          *) continue ;;
+        esac
+        STEP="$act simulator $name"
+        echo "Cleaning $STEP..."
+        before=$FAIL_COUNT
+        simulator_device_act "$act" "$id"
+        ;;
+      *) continue ;;
+    esac
+    if [ "$FAIL_COUNT" -ne "$before" ]; then
+      FAILED_STEPS="$FAILED_STEPS  $STEP$NL"
+    fi
+  done 3<<EOF
+$SIM_ROWS
+EOF
+}
+
+# Asks at a terminal; lists the rows for a dry run, -y, or no terminal.
+handle_simulators() {
+  [ -n "$SIM_ROWS" ] || return 0
+  if [ "$DRY_RUN" -eq 1 ]; then
+    print_simulators "asked one by one at a terminal"
+  elif [ "$YES" -eq 1 ] || [ ! -t 0 ]; then
+    print_simulators "skipped; run consuela --simulators at a terminal without -y to choose"
+  else
+    ask_simulators
+  fi
+  echo
 }
 
 filter_xcode_apps() {
@@ -1723,7 +1980,7 @@ report_review() {
     "simulator runtime dyld cache owned by root; no supported cleanup"
   review_line "$HOME/Library/Developer/CoreSimulator/Devices" \
     "$TILDE/Library/Developer/CoreSimulator/Devices" \
-    "available simulators; delete ones you no longer use in Xcode > Devices and Simulators"
+    "available simulators; consuela --simulators asks about each one of 100M or more"
   review_line "$HOME/Library/Developer/Xcode/iOS DeviceSupport" \
     "$TILDE/Library/Developer/Xcode/iOS DeviceSupport" \
     "symbols for devices you connected; keep the folder for your current device's iOS version"
@@ -1848,6 +2105,11 @@ run_report() {
     print_docker_volumes
     echo
   fi
+  scan_simulators
+  if [ -n "$SIM_ROWS" ]; then
+    print_simulators "consuela --simulators asks about each one at a terminal"
+    echo
+  fi
   echo "Measuring review-only paths. Large folders can take a minute..."
   report_review
   echo
@@ -1869,6 +2131,7 @@ consuela_main() {
   DO_PREVIEWS=0
   DO_MCP=0
   DO_FUSION=0
+  DO_SIMS=0
   DOCKER_MODE=all
   ANY_GROUP=0
   YES=0
@@ -1884,6 +2147,7 @@ consuela_main() {
       --xcode-previews) DO_PREVIEWS=1; ANY_GROUP=1 ;;
       --xcodebuildmcp) DO_MCP=1; ANY_GROUP=1 ;;
       --fusion) DO_FUSION=1; ANY_GROUP=1 ;;
+      --simulators) DO_SIMS=1; ANY_GROUP=1 ;;
       --docker-volume)
         if [ $# -lt 2 ] || ! valid_volume_name "$2"; then
           echo "error: --docker-volume needs a volume name" >&2
@@ -1990,6 +2254,9 @@ consuela_main() {
   if [ "$DO_CACHE" -eq 1 ]; then
     scan_unknown_caches
   fi
+  if [ "$DO_SIMS" -eq 1 ]; then
+    scan_simulators
+  fi
 
   firm_kb=$(sum_plan_kb firm)
   estimate_kb=$(sum_plan_kb estimate)
@@ -2004,12 +2271,13 @@ consuela_main() {
       print_docker_volumes
       echo
     fi
-    if [ -z "$UNKNOWN_CACHES" ]; then
+    if [ -z "$UNKNOWN_CACHES" ] && [ -z "$SIM_ROWS" ]; then
       echo "Nothing to clean."
       exit 0
     fi
     FAILED_STEPS=
     handle_unknown_caches
+    handle_simulators
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "Dry run: nothing deleted."
       exit 0
@@ -2027,6 +2295,7 @@ consuela_main() {
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     handle_unknown_caches
+    handle_simulators
   fi
 
   need_confirm=$((1 - YES))
@@ -2081,6 +2350,10 @@ consuela_main() {
     echo
     handle_unknown_caches
   fi
+  if [ -n "$SIM_ROWS" ]; then
+    echo
+    handle_simulators
+  fi
   finish_run
 }
 
@@ -2096,6 +2369,7 @@ DOCKER_VOLUMES_STATE=
 DOCKER_VOLUME_ROWS=
 DOCKER_SHOW_VOLUMES=
 UNKNOWN_CACHES=
+SIM_ROWS=
 YES=0
 DOCKER_MODE=all
 init_safety
