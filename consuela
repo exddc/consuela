@@ -11,7 +11,7 @@ TILDE='~'
 usage() {
   cat <<'EOF'
 usage: consuela [--xcode] [--cache] [--docker | --docker-all | --docker-dangling]
-                [--xcode-previews] [--xcodebuildmcp]
+                [--xcode-previews] [--xcodebuildmcp] [--fusion]
                 [--docker-volume NAME]... [-y] [--dry-run]
        consuela --report [-y]
        consuela --update
@@ -42,6 +42,8 @@ Opt-in:
                       (xcrun simctl --set <Previews set> delete all)
   --xcodebuildmcp     XcodeBuildMCP DerivedData and finished test products;
                       workspaces with a held lock are skipped
+  --fusion            Fusion webdeploy versions no launcher points to, and
+                      broken launchers; skipped while Fusion runs
   --docker-volume NAME
                       delete one named Docker volume; repeat for more.
                       Each needs the name typed at a terminal, even with -y.
@@ -843,6 +845,142 @@ EOF
     "XcodeBuildMCP finished test products ($tp_count run(s))" mcp_test_products "$tp_paths"
 }
 
+FUSION_PROD_REL="Library/Application Support/Autodesk/webdeploy/production"
+
+# Prints the version folder names that a launcher symlink in Fusion's
+# production folder $1 resolves into.
+fusion_active_versions() {
+  prod_real=$(canonical_dir "$1") || return 0
+  for link in "$1"/*.app; do
+    [ -L "$link" ] || continue
+    app=$(canonical_dir "$link") || continue
+    case "$app" in
+      "$prod_real"/?*) ;;
+      *) continue ;;
+    esac
+    rel=${app#"$prod_real"/}
+    printf '%s\n' "${rel%%/*}"
+  done
+}
+
+# Prints Fusion processes, nothing when none run. Fails when pgrep cannot
+# answer.
+running_fusion() {
+  pgrep_procs -f -u "$(id -u)" '[/]Autodesk/webdeploy/'
+}
+
+# Usage: fusion_inactive_version <production folder> <name> <active names>.
+# Fails unless <name> is a real folder named in hex that holds a Fusion app,
+# is not active, and is not newer than every launcher. Returns 2 when only
+# the last check fails.
+fusion_inactive_version() {
+  case "$2" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  fv="$1/$2"
+  [ -d "$fv" ] && [ ! -L "$fv" ] || return 1
+  [ -d "$fv/Autodesk Fusion.app" ] || [ -d "$fv/Autodesk Fusion 360.app" ] || return 1
+  ! printf '%s\n' "$3" | grep -qxF -- "$2" || return 1
+  v_time=$(stat -f %m "$fv" 2>/dev/null) || return 1
+  for link in "$1"/*.app; do
+    [ -L "$link" ] && [ -e "$link" ] || continue
+    l_time=$(stat -f %m "$link" 2>/dev/null) || return 1
+    [ "$v_time" -le "$l_time" ] || return 2
+  done
+}
+
+scan_fusion() {
+  prod="$HOME/$FUSION_PROD_REL"
+  [ -e "$prod" ] || return 0
+  if [ -L "$prod" ] || [ "$(canonical_dir "$prod")" != "$HOME_REAL/$FUSION_PROD_REL" ]; then
+    warn "skipping unsafe path: $prod"
+    return 0
+  fi
+  prod=$HOME_REAL/$FUSION_PROD_REL
+  if ! procs=$(running_fusion); then
+    warn "cannot check whether Fusion runs; skipping Fusion versions"
+    return 0
+  fi
+  if [ -n "$procs" ]; then
+    warn "Fusion is running; quit it to clean old Fusion versions"
+    return 0
+  fi
+  active=$(fusion_active_versions "$prod")
+  if [ -z "$active" ]; then
+    warn "no Fusion launcher points to a version; skipping Fusion versions"
+    return 0
+  fi
+  paths=
+  n=0
+  for v in "$prod"/*/; do
+    v=${v%/}
+    name=${v##*/}
+    case "$name" in
+      *.app) continue ;;
+    esac
+    fusion_inactive_version "$prod" "$name" "$active" && rc=0 || rc=$?
+    case "$rc" in
+      0)
+        paths="$paths$v$NL"
+        n=$((n + 1))
+        ;;
+      2) warn "keeping Fusion version $name: it is newer than the launcher, maybe an update in progress" ;;
+    esac
+  done
+  [ "$n" -gt 0 ] || return 0
+  label="Inactive Fusion versions ($n)"
+  broken=0
+  for link in "$prod"/*.app; do
+    [ -L "$link" ] && [ ! -e "$link" ] || continue
+    paths="$paths$link$NL"
+    broken=$((broken + 1))
+  done
+  if [ "$broken" -gt 0 ]; then
+    label="$label, $broken broken launcher(s)"
+  fi
+  claim_paths "$paths"
+  paths=${CLAIMED_PATHS%"$NL"}
+  add fusion "$(printf '%s\n' "$paths" | paths_du_kb)" "$label" fusion_versions "$paths"
+}
+
+# Rechecks that Fusion is stopped and each planned path is still an inactive
+# version or a broken launcher, then deletes it.
+fusion_versions_remove() {
+  prod=$HOME_REAL/$FUSION_PROD_REL
+  if ! procs=$(running_fusion) || [ -n "$procs" ]; then
+    echo "  skipped: Fusion is running now, or the check failed" >&2
+    fail
+    return 0
+  fi
+  active=$(fusion_active_versions "$prod")
+  if [ -z "$active" ]; then
+    echo "  skipped: no Fusion launcher points to a version now" >&2
+    fail
+    return 0
+  fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    name=${p##*/}
+    if [ "${p%/*}" != "$prod" ] || [ "$(canonical_dir "$prod")" != "$prod" ]; then
+      echo "refusing to delete unsafe path: $p" >&2
+      fail
+    elif [ -L "$p" ]; then
+      case "$name" in
+        *.app) if [ ! -e "$p" ]; then run_ok rm -f -- "$p"; fi ;;
+        *) echo "refusing to delete unsafe path: $p" >&2; fail ;;
+      esac
+    elif fusion_inactive_version "$prod" "$name" "$active"; then
+      run_ok rm -rf -- "$p"
+    else
+      echo "refusing to delete active or unknown Fusion folder: $p" >&2
+      fail
+    fi
+  done <<EOF
+$1
+EOF
+}
+
 # Prints the path a ShipItState.plist file:// URL key points to. Fails when
 # the key is missing or the file cannot be parsed.
 shipit_url_path() {
@@ -1376,6 +1514,9 @@ run_action() {
     docker_volume)
       docker_volume_remove "$arg"
       ;;
+    fusion_versions)
+      fusion_versions_remove "$arg"
+      ;;
     simctl_unavailable)
       run_ok xcrun simctl delete unavailable
       ;;
@@ -1502,30 +1643,27 @@ report_shipit() {
 }
 
 report_fusion() {
-  prod="$HOME/Library/Application Support/Autodesk/webdeploy/production"
+  prod="$HOME/$FUSION_PROD_REL"
   [ -d "$prod" ] || return 0
-  active=
-  for link in "$prod"/*.app; do
-    [ -L "$link" ] || continue
-    target=$(readlink "$link") || continue
-    case "$target" in
-      /*) ;;
-      *) target="$prod/$target" ;;
-    esac
-    [ -e "$target" ] || continue
-    t=${target#"$prod"/}
-    active="$active${t%%/*}$NL"
-  done
+  active=$(fusion_active_versions "$prod")
   for v in "$prod"/*/; do
     v=${v%/}
     [ -d "$v" ] && [ ! -L "$v" ] || continue
     case "${v##*/}" in
       *.app) continue ;;
     esac
+    ! overlaps_claimed "$v" || continue
     if printf '%s' "$active" | grep -qxF -- "${v##*/}"; then
       note="active Fusion install (launcher points here); keep"
+    elif [ -z "$active" ]; then
+      note="no launcher resolves to a version, so --fusion skips it"
     else
-      note="no launcher points here; remove only through Autodesk's tools"
+      fusion_inactive_version "$prod" "${v##*/}" "$active" && rc=0 || rc=$?
+      case "$rc" in
+        0) note="inactive; quit Fusion, then consuela --fusion deletes it" ;;
+        2) note="newer than the launcher, maybe an update in progress; --fusion keeps it" ;;
+        *) note="not a Fusion version folder consuela recognizes; --fusion keeps it" ;;
+      esac
     fi
     review_line "$v" "Fusion webdeploy ${v##*/}" "$note"
   done
@@ -1680,12 +1818,13 @@ run_report() {
   scan_xcode
   scan_xcode_previews
   scan_xcodebuildmcp
+  scan_fusion
   scan_cache
   scan_docker
   scan_unknown_caches
 
   defaults="xcode cache docker"
-  optin="xcode-previews xcodebuildmcp"
+  optin="xcode-previews xcodebuildmcp fusion"
   echo
   echo "Cleanup targets (size measured on disk; ~ = estimated reclaimable; ? = unknown):"
   if [ "$PLAN_COUNT" -eq 0 ]; then
@@ -1729,6 +1868,7 @@ consuela_main() {
   DO_DOCKER=0
   DO_PREVIEWS=0
   DO_MCP=0
+  DO_FUSION=0
   DOCKER_MODE=all
   ANY_GROUP=0
   YES=0
@@ -1743,6 +1883,7 @@ consuela_main() {
       --docker-dangling) DO_DOCKER=1; ANY_GROUP=1; DOCKER_MODE=dangling ;;
       --xcode-previews) DO_PREVIEWS=1; ANY_GROUP=1 ;;
       --xcodebuildmcp) DO_MCP=1; ANY_GROUP=1 ;;
+      --fusion) DO_FUSION=1; ANY_GROUP=1 ;;
       --docker-volume)
         if [ $# -lt 2 ] || ! valid_volume_name "$2"; then
           echo "error: --docker-volume needs a volume name" >&2
@@ -1833,6 +1974,9 @@ consuela_main() {
   fi
   if [ "$DO_MCP" -eq 1 ]; then
     scan_xcodebuildmcp
+  fi
+  if [ "$DO_FUSION" -eq 1 ]; then
+    scan_fusion
   fi
   if [ "$DO_CACHE" -eq 1 ]; then
     scan_cache
