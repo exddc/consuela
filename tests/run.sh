@@ -409,6 +409,7 @@ setup
 before=$(inventory)
 for args in "--dry-run" "--dry-run --xcode" "--dry-run --cache" "--dry-run --docker" \
   "--dry-run --docker-dangling" "--dry-run --xcode-previews" "--dry-run --xcodebuildmcp" \
+  "--dry-run --fusion" \
   "--dry-run --docker-volume openchime-buildroot-cache" \
   "--dry-run -y --xcode-previews --xcodebuildmcp --cache --xcode --docker" \
   "--report" "--report -y"; do
@@ -426,7 +427,7 @@ done
 check "dry runs and reports leave every fixture file unchanged" [ "$before" = "$(inventory)" ]
 
 run --dry-run
-for optin in "Xcode Previews" XcodeBuildMCP "Docker volume openchime"; do
+for optin in "Xcode Previews" XcodeBuildMCP "Docker volume openchime" "Inactive Fusion"; do
   check "default run leaves out opt-in $optin" lacks "$OUT" "$optin"
 done
 check "default run still lists the existing groups" contains "$OUT" "XCTestDevices"
@@ -437,6 +438,8 @@ check "report lists opt-in previews with its flag" contains "$OUT" "--xcode-prev
 check "report lists the volume as kept" contains "$OUT" "openchime-buildroot-cache  (no containers use it)"
 check "report shows Cursor's pending update" contains "$OUT" "pending install: update.I0j8oPc"
 check "report marks the active Fusion install" contains "$OUT" "active Fusion install"
+check "report lists inactive Fusion versions with their flag" contains "$OUT" "Inactive Fusion versions (1)"
+check "report review leaves out planned Fusion versions" lacks "$OUT" "Fusion webdeploy bb8a77c5"
 check "report lists the dyld cache only for review" contains "$OUT" "no supported cleanup"
 check "report shows Docker df rows unsummed" contains "$OUT" "Build Cache: 4.503GB total, 4.009GB reclaimable"
 check "report lists Poetry virtualenvs as kept" contains "$OUT" "--cache keeps them"
@@ -493,6 +496,118 @@ ln -s "$T/outside/set" "$P/Simulator Devices"
 run -y --xcode-previews
 check "symlinked Previews set rejected" contains "$ERR" "skipping unsafe path"
 check "symlinked Previews set not deleted" [ -z "$(mutations)" ]
+
+echo "== Fusion deletes only inactive versions and broken launchers"
+fusion_setup() {
+  setup
+  F="$H/Library/Application Support/Autodesk/webdeploy/production"
+}
+fusion_setup
+mkfile_kb "$F/dc1831ab/ExportedParameters.csv._xx" 1
+ln -s "$F/9999aaaa/Autodesk Fusion 360.app" "$F/Autodesk Fusion 360.app"
+touch -t 202601010000 "$F/bb8a77c5"
+touch -h -t 202602010000 "$F/Autodesk Fusion.app"
+run --dry-run --fusion
+check "fusion plan lists one inactive version ($OUT)" contains "$OUT" "Inactive Fusion versions (1), 1 broken launcher(s)"
+run -y --fusion
+check "fusion run exits 0 ($ST: $ERR)" [ "$ST" -eq 0 ]
+check "inactive version deleted" [ ! -e "$F/bb8a77c5" ]
+check "active version kept" [ -f "$F/024afa2c/Autodesk Fusion.app/x" ]
+check "active launcher kept" [ -L "$F/Autodesk Fusion.app" ]
+ok "broken launcher deleted" '[ ! -L "$F/Autodesk Fusion 360.app" ]'
+check "folder without a Fusion app kept" [ -f "$F/dc1831ab/ExportedParameters.csv._xx" ]
+fusion_setup
+mkfile_kb "$F/cccc1111/Autodesk Fusion.app/x" 8
+touch -t 202601010000 "$F/bb8a77c5"
+touch -h -t 202602010000 "$F/Autodesk Fusion.app"
+run -y --fusion
+check "version newer than the launcher kept" [ -f "$F/cccc1111/Autodesk Fusion.app/x" ]
+check "newer version warned" contains "$ERR" "maybe an update in progress"
+check "older inactive version still deleted" [ ! -e "$F/bb8a77c5" ]
+fusion_setup
+echo "77 Autodesk Fusion $F/024afa2c/Autodesk Fusion.app/Contents/MacOS/Autodesk Fusion" >"$S/procs"
+before=$(inventory)
+run -y --fusion
+check "running Fusion skips the scan" contains "$ERR" "Fusion is running"
+check "running Fusion deletes nothing" [ "$before" = "$(inventory)" ]
+fusion_setup
+rm "$F/Autodesk Fusion.app"
+before=$(inventory)
+run -y --fusion
+check "no launcher skips the scan" contains "$ERR" "no Fusion launcher points to a version"
+check "no launcher deletes nothing" [ "$before" = "$(inventory)" ]
+fusion_setup
+touch -t 202601010000 "$F/bb8a77c5"
+(
+  HOME=$H TMPDIR=$T/tmp PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" CONSUELA_TEST_STATE=$S
+  export HOME TMPDIR PATH CONSUELA_TEST_STATE
+  # shellcheck source=../consuela disable=SC1091
+  . "$ROOT/consuela"
+  plan_init
+  scan_fusion 2>/dev/null
+  rm "$F/Autodesk Fusion.app"
+  ln -s "$F/bb8a77c5/Autodesk Fusion.app" "$F/Autodesk Fusion.app"
+  run_plan >/dev/null 2>&1
+  rm -rf "$PLAN_DIR"
+  [ "$FAIL_COUNT" -ge 1 ] || exit 1
+)
+check "version made active after the scan fails its step" [ $? -eq 0 ]
+check "version made active after the scan is kept" [ -f "$F/bb8a77c5/Autodesk Fusion.app/x" ]
+fusion_setup
+touch -t 202601010000 "$F/bb8a77c5"
+(
+  HOME=$H TMPDIR=$T/tmp PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" CONSUELA_TEST_STATE=$S
+  export HOME TMPDIR PATH CONSUELA_TEST_STATE
+  # shellcheck source=../consuela disable=SC1091
+  . "$ROOT/consuela"
+  plan_init
+  scan_fusion 2>/dev/null
+  echo "77 Autodesk Fusion $F/024afa2c/Autodesk Fusion.app/Contents/MacOS/Autodesk Fusion" >"$S/procs"
+  run_plan >/dev/null 2>&1
+  rm -rf "$PLAN_DIR"
+  [ "$FAIL_COUNT" -ge 1 ] || exit 1
+)
+check "Fusion started after the scan fails the step" [ $? -eq 0 ]
+check "Fusion started after the scan keeps every version" [ -f "$F/bb8a77c5/Autodesk Fusion.app/x" ]
+fusion_setup
+rm "$F/Autodesk Fusion.app"
+ln -s "$F/024afa2c" "$F/Autodesk Fusion.app"
+touch -t 202601010000 "$F/bb8a77c5"
+run -y --fusion
+check "launcher pointing at a version folder keeps it" [ -f "$F/024afa2c/Autodesk Fusion.app/x" ]
+check "other inactive version still deleted" [ ! -e "$F/bb8a77c5" ]
+fusion_setup
+touch -t 202601010000 "$F/bb8a77c5"
+mkfile_kb "$F/eeee5555/Autodesk Fusion 360.app/x" 8
+mkfile_kb "$F/Fusion-Beta/Autodesk Fusion.app/x" 8
+mkfile_kb "$T/outside/fusion/Autodesk Fusion.app/x" 8
+ln -s "$T/outside/fusion" "$F/dddd4444"
+touch -t 202601010000 "$F/eeee5555" "$F/Fusion-Beta"
+touch -h -t 202602010000 "$F/Autodesk Fusion.app"
+run -y --fusion
+check "old Fusion 360 version deleted" [ ! -e "$F/eeee5555" ]
+check "non-hex folder kept" [ -f "$F/Fusion-Beta/Autodesk Fusion.app/x" ]
+check "symlinked version folder kept" [ -L "$F/dddd4444" ]
+check "symlinked version target kept" [ -f "$T/outside/fusion/Autodesk Fusion.app/x" ]
+check "only newer folders warn about updates" lacks "$ERR" "update in progress"
+check "label leaves out broken launchers when none exist" lacks "$OUT" "broken launcher"
+fusion_setup
+: >"$S/pgrep_fail"
+before=$(inventory)
+run -y --fusion
+check "failed process check skips the scan" contains "$ERR" "cannot check whether Fusion runs"
+check "failed process check deletes nothing" [ "$before" = "$(inventory)" ]
+fusion_setup
+mv "$F" "$T/outside/production"
+ln -s "$T/outside/production" "$F"
+before=$(inventory)
+run -y --fusion
+check "symlinked production folder refused" contains "$ERR" "skipping unsafe path: $F"
+check "symlinked production folder deletes nothing" [ "$before" = "$(inventory)" ]
+fusion_setup
+rm "$F/Autodesk Fusion.app"
+run --report
+check "report without a launcher says --fusion skips" contains "$OUT" "no launcher resolves to a version, so --fusion skips it"
 
 echo "== simulators are asked about one by one"
 R18=com.apple.CoreSimulator.SimRuntime.iOS-18-5
