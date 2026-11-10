@@ -2003,6 +2003,69 @@ report_review() {
   review_line "$HOME/Library/Caches/pypoetry/virtualenvs" \
     "Poetry virtualenvs" "project environments; --cache keeps them"
   report_docker_disk
+  report_snapshots
+  report_pending_deletes
+}
+
+report_snapshots() {
+  have tmutil || return 0
+  snaps=$(tmutil listlocalsnapshots / 2>/dev/null | grep -o 'com\.apple\.TimeMachine\.[0-9-]*') || return 0
+  n=$(printf '%s\n' "$snaps" | grep -c .)
+  newest=$(printf '%s\n' "$snaps" | LC_ALL=C sort | sed -n '$p')
+  printf '  %9s  %s\n' '?' "$n Time Machine local snapshot(s), newest ${newest#com.apple.TimeMachine.}"
+  printf '             %s\n' "can hold deleted files until macOS removes them, usually within 24 hours; tmutil deletelocalsnapshots / removes these local restore points now"
+}
+
+# Prints "<count> <kb>" for simulator runtime images that simctl is still
+# deleting. Prints nothing when there are none or simctl cannot answer.
+deleting_runtimes() {
+  xcode_ready && have_dev_tool python3 || return 0
+  python3 - <<'PY'
+import json, os, subprocess
+
+path = os.environ.get("CONSUELA_FIXTURE_RUNTIME_IMAGES")
+try:
+    if path:
+        with open(path, "rb") as f:
+            raw = f.read()
+    else:
+        raw = subprocess.check_output(["xcrun", "simctl", "runtime", "list", "-j"], stderr=subprocess.DEVNULL)
+    images = [i for i in json.loads(raw).values() if isinstance(i, dict) and i.get("state") == "Deleting"]
+    kb = sum(int(i.get("sizeBytes") or 0) for i in images) // 1024
+except Exception:
+    images = []
+if images:
+    print(len(images), kb)
+PY
+}
+
+# Space that frees itself: folders macOS moved aside to delete, and
+# runtimes simctl is still deleting. The temp folder comes from getconf,
+# because CoreSimulator does not use a TMPDIR the shell overrides.
+report_pending_deletes() {
+  tmp=${CONSUELA_FIXTURE_TEMP_DIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || :)}
+  if [ -n "$tmp" ]; then
+    n=0
+    kb=0
+    partial=
+    for d in "${tmp%/}"/Deleting-*; do
+      [ -d "$d" ] && [ ! -L "$d" ] || continue
+      n=$((n + 1))
+      m=$(measure_kb "$d")
+      kb=$((kb + ${m%% *}))
+      [ "${m#* }" = ok ] || partial='>'
+    done
+    if [ "$n" -gt 0 ]; then
+      note="pending deletes, such as removed simulators; macOS removes them in the background or at restart"
+      [ -z "$partial" ] || note="$note; part of it is unreadable"
+      printf '  %9s  %s\n' "$partial$(fmt_kb "$kb")" "$n Deleting-* folder(s) in the temp folder"
+      printf '             %s\n' "$note"
+    fi
+  fi
+  pending=$(deleting_runtimes) || pending=
+  [ -n "$pending" ] || return 0
+  printf '  %9s  %s\n' "$(fmt_kb "${pending#* }")" "${pending%% *} simulator runtime(s) being deleted"
+  printf '             %s\n' "simctl removes them in the background; the space returns when it finishes"
 }
 
 # Read-only: scans every group and prints sizes. Never runs run_plan.
