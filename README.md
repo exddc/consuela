@@ -78,6 +78,7 @@ These flags are never part of a run without flags. Name them to include them. A 
 | --- | --- | --- |
 | `--xcode-previews` | Xcode Previews simulators, with `xcrun simctl --set "~/Library/Developer/Xcode/UserData/Previews/Simulator Devices" delete all` | the rest of `Xcode/UserData`, and `Simulator%20Devices` |
 | `--xcodebuildmcp` | in `~/Library/Developer/XcodeBuildMCP/workspaces/*`: the contents of `DerivedData`, and finished `test-products/*.xctestproducts` with their completion markers | `state`, `locks`, `logs`, `result-bundles`, other files, and whole workspaces that hold a lock |
+| `--fusion` | in `~/Library/Application Support/Autodesk/webdeploy/production`: Fusion version folders no launcher points to, and with them launchers whose version is gone | the active version, its launcher, `meta`, folders without a Fusion app, and folders newer than the launchers |
 | `--docker-volume NAME` | one named Docker volume, with `docker volume rm NAME` | every volume you did not name |
 
 **Xcode Previews.** simctl deletes only registered devices, the folders with a `device.plist`. Folders without one stay. consuela never deletes `Xcode/UserData` itself. The Xcode check described above also covers this flag.
@@ -89,6 +90,14 @@ These flags are never part of a run without flags. Name them to include them. A 
 - A workspace with anything in `locks`, or an unreadable `locks` folder, is skipped.
 
 consuela checks these rules again right before it deletes. When `XcodeBuildMCP` runs, consuela lists it with the Xcode tools and asks even with `-y`.
+
+**Fusion.** Fusion keeps each version it streams in a folder named by a hex hash, about 11G each, and leaves old ones behind after updates. The `Autodesk Fusion.app` launcher symlink points into the active version. A folder qualifies only when all of these hold:
+
+- No launcher resolves into it.
+- Its name is lowercase hex, and it holds `Autodesk Fusion.app` or `Autodesk Fusion 360.app`.
+- It is not newer than the launchers. A newer folder can be an update that is still downloading, so consuela keeps it and warns.
+
+consuela skips the whole flag when no launcher points to a version, or when a process runs from `webdeploy`, such as Fusion or its streamer. It checks these rules again right before it deletes. Open Fusion once afterwards to confirm it starts.
 
 **ShipIt folders are never deleted.** Electron apps stage updates in `~/Library/Caches/<id>.ShipIt`. `ShipItState.plist` is JSON, and its `updateBundleURL` names the pending update. Cursor, for example, can hold a pending update that it installs on the next quit. `--report` lists these folders with the pending update and whether the updater runs.
 
@@ -111,7 +120,7 @@ consuela --report
 
 - **Cleanup targets**: each plan line with the flag that selects it, then the other caches of 1G or more that a run at a terminal asks about. Sizes are measured on disk. `~` marks an estimate of what the command frees, and `?` an unknown size. Totals show the run without flags and the opt-in flags separately.
 - **Docker volumes**: name, size, and how many containers use each one.
-- **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, and `docker system df`. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
+- **Review only**: data consuela never deletes. It includes `/Library/Developer/CoreSimulator/Caches/dyld`, simulator devices, iOS DeviceSupport, ShipIt updates, Playwright browsers, Fusion webdeploy folders that `--fusion` keeps (the active one is marked), Notion, Spotify, Linear, and BambuStudio data, Poetry virtualenvs, the Docker Desktop disk image, and `docker system df`. Each line says how to clean that data safely, if there is a way. A `>` before a size means part of the folder was unreadable.
 
 The report checks fixed paths only. It does not search the whole disk.
 
@@ -177,6 +186,7 @@ consuela --docker-dangling
 consuela --xcode --cache
 consuela --dry-run --cache
 consuela --dry-run --xcode-previews --xcodebuildmcp
+consuela --fusion
 consuela --docker-volume my-volume
 consuela --report
 ```
